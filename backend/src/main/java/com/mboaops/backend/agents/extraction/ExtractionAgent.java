@@ -23,6 +23,8 @@ public class ExtractionAgent {
     private static final String PROMPT_IMAGE = """
             Extrais les produits et quantités de cette liste manuscrite en JSON strict
             [{"produit": "...", "quantite": N, "confidence": 0.0-1.0}].
+            "produit" est le nom générique du produit, au singulier, sans quantité ni
+            emballage (ex. "ciment", "savon", "tôle").
             Marque confidence < 0.7 si illisible.
             Réponds UNIQUEMENT avec le tableau JSON, sans texte autour ni balises markdown.
             """;
@@ -30,6 +32,8 @@ public class ExtractionAgent {
     private static final String PROMPT_TEXTE = """
             Extrais les produits et quantités de ce message client en JSON strict
             [{"produit": "...", "quantite": N, "confidence": 0.0-1.0}].
+            "produit" est le nom générique du produit, au singulier, sans quantité ni
+            emballage (ex. "ciment", "savon", "tôle").
             Le message peut être en français camerounais ou camfranglais.
             Marque confidence < 0.7 si la quantité ou le produit est ambigu.
             Réponds UNIQUEMENT avec le tableau JSON, sans texte autour ni balises markdown.

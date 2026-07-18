@@ -1,9 +1,5 @@
 package com.mboaops.backend.api;
 
-import com.mboaops.backend.agents.extraction.ExtractionAgent;
-import com.mboaops.backend.agents.extraction.ExtractionLigne;
-import com.mboaops.backend.agents.fusion.FusionResult;
-import com.mboaops.backend.agents.fusion.FusionService;
 import com.mboaops.backend.api.dto.MessageRequest;
 import com.mboaops.backend.api.dto.MessageResponse;
 import com.mboaops.backend.domain.client.Client;
@@ -13,21 +9,21 @@ import com.mboaops.backend.domain.commande.CommandeRepository;
 import com.mboaops.backend.domain.commande.CommandeStatut;
 import com.mboaops.backend.eventstore.Event;
 import com.mboaops.backend.eventstore.EventStore;
+import com.mboaops.backend.pipeline.CommandePipelineService;
+import com.mboaops.backend.pipeline.ResultatPipeline;
 import org.springframework.stereotype.Service;
-import org.springframework.transaction.annotation.Transactional;
 
 import java.math.BigDecimal;
 import java.util.HashMap;
-import java.util.List;
 import java.util.Map;
 
 /**
  * Point d'entrée d'un message client (WhatsApp texte/audio/image). Chaque
- * message ouvre une nouvelle commande à l'état RECUE et journalise
- * l'événement correspondant dans l'event store. Le flux multimodal
- * (extraction image/audio + fusion) s'exécute hors transaction : chaque
- * étape persiste son propre état pour ne pas tenir une connexion pendant
- * les appels LLM.
+ * message ouvre une nouvelle commande à l'état RECUE, journalise
+ * MESSAGE_RECU, puis déroule le pipeline complet (routeur -> extraction ->
+ * fusion -> règles métier -> HITL). Volontairement hors transaction :
+ * chaque étape du pipeline persiste son propre état pour ne pas tenir de
+ * connexion pendant les appels LLM.
  */
 @Service
 public class MessageIngestionService {
@@ -35,25 +31,20 @@ public class MessageIngestionService {
     private final ClientRepository clientRepository;
     private final CommandeRepository commandeRepository;
     private final EventStore eventStore;
-    private final ExtractionAgent extractionAgent;
-    private final FusionService fusionService;
+    private final CommandePipelineService pipeline;
 
     public MessageIngestionService(ClientRepository clientRepository,
                                     CommandeRepository commandeRepository,
                                     EventStore eventStore,
-                                    ExtractionAgent extractionAgent,
-                                    FusionService fusionService) {
+                                    CommandePipelineService pipeline) {
         this.clientRepository = clientRepository;
         this.commandeRepository = commandeRepository;
         this.eventStore = eventStore;
-        this.extractionAgent = extractionAgent;
-        this.fusionService = fusionService;
+        this.pipeline = pipeline;
     }
 
-    @Transactional
     public MessageResponse ingest(MessageRequest request) {
         Client client = trouverOuCreerClient(request.getClientPhone());
-
         Commande commande = commandeRepository.save(
                 new Commande(client, CommandeStatut.RECUE, BigDecimal.ZERO));
 
@@ -61,10 +52,18 @@ public class MessageIngestionService {
                 "clientPhone", request.getClientPhone(),
                 "type", request.getType().name(),
                 "content", request.getContent());
-
         Event event = eventStore.append(commande.getId(), "MESSAGE_RECU", payload);
 
-        return new MessageResponse(commande.getId(), event.getId(), commande.getStatut().name());
+        ResultatPipeline resultat = switch (request.getType()) {
+            case TEXT -> pipeline.traiterTexte(commande, request.getContent());
+            // En JSON, audio et image arrivent déjà encodés en base64 dans content.
+            case AUDIO -> pipeline.traiterMultimodal(commande, null,
+                    request.getContent(), "mp3", null, null);
+            case IMAGE -> pipeline.traiterMultimodal(commande, null,
+                    null, null, request.getContent(), "image/jpeg");
+        };
+
+        return construireReponse(commande, event, resultat);
     }
 
     public MessageResponse ingestMultimodal(String clientPhone,
@@ -85,30 +84,19 @@ public class MessageIngestionService {
         payload.put("hasImage", imageBase64 != null);
         Event event = eventStore.append(commande.getId(), "MESSAGE_RECU", payload);
 
-        List<ExtractionLigne> depuisAudio = List.of();
-        if (audioBase64 != null) {
-            String transcript = extractionAgent.transcribeAudio(commande.getId(), audioBase64, audioFormat);
-            if (!transcript.isBlank()) {
-                depuisAudio = extractionAgent.extractFromTexte(commande.getId(), transcript);
-            }
-        }
+        ResultatPipeline resultat = pipeline.traiterMultimodal(
+                commande, texte, audioBase64, audioFormat, imageBase64, imageMimeType);
 
-        List<ExtractionLigne> depuisImage = List.of();
-        if (imageBase64 != null) {
-            depuisImage = extractionAgent.extractFromImage(commande.getId(), imageBase64, imageMimeType);
-        }
+        return construireReponse(commande, event, resultat);
+    }
 
-        FusionResult fusion;
-        if (depuisAudio.isEmpty() && depuisImage.isEmpty()) {
-            // Rien d'exploitable extrait : la commande reste RECUE, un humain
-            // ou une clarification ultérieure prendra le relais.
-            fusion = new FusionResult(List.of(), List.of(), null);
-        } else {
-            fusion = fusionService.fusionner(commande, depuisAudio, depuisImage);
-        }
-
-        return new MessageResponse(commande.getId(), event.getId(),
-                commande.getStatut().name(), fusion.messageClarification());
+    private MessageResponse construireReponse(Commande commande, Event event, ResultatPipeline resultat) {
+        MessageResponse reponse = new MessageResponse(
+                commande.getId(), event.getId(), resultat.statut(), resultat.clarification());
+        reponse.setIntention(resultat.intention());
+        reponse.setDecision(resultat.decision());
+        reponse.setDecisionCardId(resultat.decisionCardId());
+        return reponse;
     }
 
     private Client trouverOuCreerClient(String clientPhone) {

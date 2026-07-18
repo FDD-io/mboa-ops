@@ -23,6 +23,29 @@ spring:
       max-file-size: 20MB
       max-request-size: 25MB
 
+# Circuits : 3 échecs consécutifs -> OPEN pendant 60s, puis 1 appel d'essai
+# en half-open. FORCED_OPEN est réservé au kill switch /api/chaos.
+resilience4j:
+  circuitbreaker:
+    configs:
+      default:
+        sliding-window-type: COUNT_BASED
+        sliding-window-size: 3
+        minimum-number-of-calls: 3
+        failure-rate-threshold: 100
+        wait-duration-in-open-state: 60s
+        permitted-number-of-calls-in-half-open-state: 1
+        automatic-transition-from-open-to-half-open-enabled: true
+    instances:
+      qwen:
+        base-config: default
+      whatsapp:
+        base-config: default
+      sms:
+        base-config: default
+      stock:
+        base-config: default
+
 mboa-ops:
   qwen:
     api-key: ${QWEN_API_KEY:}

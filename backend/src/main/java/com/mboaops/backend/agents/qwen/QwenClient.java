@@ -1,6 +1,10 @@
 package com.mboaops.backend.agents.qwen;
 
 import com.mboaops.backend.config.QwenProperties;
+import com.mboaops.backend.resilience.CircuitNames;
+import io.github.resilience4j.circuitbreaker.CallNotPermittedException;
+import io.github.resilience4j.circuitbreaker.CircuitBreaker;
+import io.github.resilience4j.circuitbreaker.CircuitBreakerRegistry;
 import org.springframework.stereotype.Service;
 import org.springframework.web.reactive.function.client.WebClient;
 import reactor.util.retry.Retry;
@@ -13,22 +17,29 @@ import java.util.Map;
  * Client HTTP pour l'API Qwen (compatible OpenAI chat completions).
  * Quatre profils de modèle : rapide (classification, routage),
  * raisonnement (décisions métier), vision (extraction d'images) et
- * ASR (transcription audio). Chaque appel a un timeout de 30s et
- * 2 tentatives de retry avec backoff exponentiel.
+ * ASR (transcription audio). Chaque appel a un timeout de 30s,
+ * 2 tentatives de retry avec backoff exponentiel, et passe par le
+ * circuit breaker "qwen" (3 échecs -> OPEN 60s).
  */
 @Service
 public class QwenClient {
 
     private static final Duration TIMEOUT = Duration.ofSeconds(30);
+    /** Le modèle de raisonnement "réfléchit" avant de répondre : ~30s sur un
+     *  prompt métier, d'où un timeout dédié plus large. */
+    private static final Duration TIMEOUT_REASONING = Duration.ofSeconds(90);
     private static final int MAX_RETRIES = 2;
     private static final Duration RETRY_BACKOFF = Duration.ofMillis(500);
 
     private final WebClient qwenWebClient;
     private final QwenProperties qwenProperties;
+    private final CircuitBreaker circuitBreaker;
 
-    public QwenClient(WebClient qwenWebClient, QwenProperties qwenProperties) {
+    public QwenClient(WebClient qwenWebClient, QwenProperties qwenProperties,
+                      CircuitBreakerRegistry circuitBreakerRegistry) {
         this.qwenWebClient = qwenWebClient;
         this.qwenProperties = qwenProperties;
+        this.circuitBreaker = circuitBreakerRegistry.circuitBreaker(CircuitNames.QWEN);
     }
 
     public String callFast(String prompt) {
@@ -38,7 +49,7 @@ public class QwenClient {
 
     public String callReasoning(String prompt) {
         return call(qwenProperties.getModelReasoning(),
-                List.of(new QwenChatMessage("user", prompt)));
+                List.of(new QwenChatMessage("user", prompt)), TIMEOUT_REASONING);
     }
 
     /**
@@ -72,6 +83,19 @@ public class QwenClient {
     }
 
     private String call(String model, List<QwenChatMessage> messages) {
+        return call(model, messages, TIMEOUT);
+    }
+
+    private String call(String model, List<QwenChatMessage> messages, Duration timeout) {
+        try {
+            return circuitBreaker.executeSupplier(() -> doCall(model, messages, timeout));
+        } catch (CallNotPermittedException e) {
+            throw new QwenClientException(
+                    "Circuit 'qwen' ouvert : appels LLM suspendus (modèle '" + model + "')", e);
+        }
+    }
+
+    private String doCall(String model, List<QwenChatMessage> messages, Duration timeout) {
         QwenChatRequest request = new QwenChatRequest(model, messages, 0.1);
 
         QwenChatResponse response;
@@ -81,7 +105,7 @@ public class QwenClient {
                     .bodyValue(request)
                     .retrieve()
                     .bodyToMono(QwenChatResponse.class)
-                    .timeout(TIMEOUT)
+                    .timeout(timeout)
                     .retryWhen(Retry.backoff(MAX_RETRIES, RETRY_BACKOFF))
                     .block();
         } catch (Exception e) {
