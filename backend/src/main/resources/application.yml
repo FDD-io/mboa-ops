@@ -1,0 +1,43 @@
+server:
+  port: 8080
+
+spring:
+  application:
+    name: mboa-ops-backend
+  datasource:
+    url: jdbc:postgresql://${DB_HOST:localhost}:${DB_PORT:5432}/${DB_NAME:mboaops}
+    username: ${DB_USER:mboaops}
+    password: ${DB_PASSWORD:mboaops}
+  jpa:
+    open-in-view: false
+    hibernate:
+      ddl-auto: validate
+    properties:
+      hibernate:
+        format_sql: true
+  flyway:
+    enabled: true
+    locations: classpath:db/migration
+  servlet:
+    multipart:
+      max-file-size: 20MB
+      max-request-size: 25MB
+
+mboa-ops:
+  qwen:
+    api-key: ${QWEN_API_KEY:}
+    base-url: ${QWEN_BASE_URL:https://dashscope-intl.aliyuncs.com/compatible-mode/v1}
+    model-fast: ${QWEN_MODEL_FAST:qwen3.6-flash}
+    model-reasoning: ${QWEN_MODEL_REASONING:qwen3.7-max}
+    model-vl: ${QWEN_MODEL_VL:qwen3-vl-flash}
+    model-asr: ${QWEN_MODEL_ASR:qwen3-asr-flash}
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info
+
+logging:
+  level:
+    com.mboaops: INFO

@@ -1,0 +1,15 @@
+# Environnement (contient les clés API)
+.env
+.env.local
+
+# Backend Maven
+backend/target/
+
+# IDE
+.idea/
+*.iml
+.vscode/
+
+# OS
+.DS_Store
+Thumbs.db

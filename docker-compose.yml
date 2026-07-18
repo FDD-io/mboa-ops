@@ -1,0 +1,38 @@
+services:
+  postgres:
+    image: postgres:16
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${DB_NAME:-mboaops}
+      POSTGRES_USER: ${DB_USER:-mboaops}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-mboaops}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-mboaops} -d ${DB_NAME:-mboaops}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  backend:
+    build:
+      context: ./backend
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_NAME: ${DB_NAME:-mboaops}
+      DB_USER: ${DB_USER:-mboaops}
+      DB_PASSWORD: ${DB_PASSWORD:-mboaops}
+      QWEN_API_KEY: ${QWEN_API_KEY:-}
+      QWEN_BASE_URL: ${QWEN_BASE_URL:-https://dashscope.aliyuncs.com/compatible-mode/v1}
+    ports:
+      - "8080:8080"
+
+volumes:
+  postgres_data:
