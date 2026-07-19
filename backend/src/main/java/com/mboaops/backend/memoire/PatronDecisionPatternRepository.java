@@ -9,9 +9,11 @@ import java.util.UUID;
 
 public interface PatronDecisionPatternRepository extends JpaRepository<PatronDecisionPattern, UUID> {
 
-    Optional<PatronDecisionPattern> findByClientIdAndTypeDecisionAndPlafond(
-            UUID clientId, String typeDecision, BigDecimal plafond);
+    Optional<PatronDecisionPattern> findByClientIdAndTypeDecisionAndPlafondAndStatut(
+            UUID clientId, String typeDecision, BigDecimal plafond, PreferenceStatut statut);
 
-    List<PatronDecisionPattern> findByClientIdAndTypeDecisionAndCompteurGreaterThanEqual(
-            UUID clientId, String typeDecision, int compteur);
+    List<PatronDecisionPattern> findByClientIdAndTypeDecisionAndStatutAndCompteurGreaterThanEqual(
+            UUID clientId, String typeDecision, PreferenceStatut statut, int compteur);
+
+    List<PatronDecisionPattern> findByCompteurGreaterThanEqualOrderByDerniereMajDesc(int compteur);
 }

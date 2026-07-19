@@ -2,6 +2,8 @@ package com.mboaops.backend.memoire;
 
 import jakarta.persistence.Column;
 import jakarta.persistence.Entity;
+import jakarta.persistence.EnumType;
+import jakarta.persistence.Enumerated;
 import jakarta.persistence.GeneratedValue;
 import jakarta.persistence.Id;
 import jakarta.persistence.Table;
@@ -36,6 +38,10 @@ public class PatronDecisionPattern {
     @Column(name = "compteur", nullable = false)
     private int compteur;
 
+    @Enumerated(EnumType.STRING)
+    @Column(name = "statut", nullable = false, length = 20)
+    private PreferenceStatut statut;
+
     @Column(name = "derniere_maj", nullable = false)
     private Instant derniereMaj;
 
@@ -47,11 +53,17 @@ public class PatronDecisionPattern {
         this.typeDecision = typeDecision;
         this.plafond = plafond;
         this.compteur = 0;
+        this.statut = PreferenceStatut.ACTIVE;
         this.derniereMaj = Instant.now();
     }
 
     public void incrementer() {
         this.compteur++;
+        this.derniereMaj = Instant.now();
+    }
+
+    public void revoquer() {
+        this.statut = PreferenceStatut.REVOQUEE;
         this.derniereMaj = Instant.now();
     }
 
@@ -93,6 +105,14 @@ public class PatronDecisionPattern {
 
     public void setCompteur(int compteur) {
         this.compteur = compteur;
+    }
+
+    public PreferenceStatut getStatut() {
+        return statut;
+    }
+
+    public void setStatut(PreferenceStatut statut) {
+        this.statut = statut;
     }
 
     public Instant getDerniereMaj() {
