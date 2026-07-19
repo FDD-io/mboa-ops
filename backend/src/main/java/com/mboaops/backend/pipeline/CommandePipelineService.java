@@ -20,7 +20,9 @@ import com.mboaops.backend.domain.produit.Produit;
 import com.mboaops.backend.domain.produit.ProduitRepository;
 import com.mboaops.backend.domain.produit.StockService;
 import com.mboaops.backend.eventstore.EventStore;
+import com.mboaops.backend.memoire.MemoryService;
 import com.mboaops.backend.notifications.NotificationService;
+import com.mboaops.backend.paiements.PaiementService;
 import org.springframework.stereotype.Service;
 
 import java.math.BigDecimal;
@@ -55,6 +57,8 @@ public class CommandePipelineService {
     private final CommandeRepository commandeRepository;
     private final EventStore eventStore;
     private final NotificationService notificationService;
+    private final PaiementService paiementService;
+    private final MemoryService memoryService;
 
     public CommandePipelineService(RouterAgent routerAgent,
                                    ExtractionAgent extractionAgent,
@@ -65,7 +69,9 @@ public class CommandePipelineService {
                                    ProduitRepository produitRepository,
                                    CommandeRepository commandeRepository,
                                    EventStore eventStore,
-                                   NotificationService notificationService) {
+                                   NotificationService notificationService,
+                                   PaiementService paiementService,
+                                   MemoryService memoryService) {
         this.routerAgent = routerAgent;
         this.extractionAgent = extractionAgent;
         this.fusionService = fusionService;
@@ -76,6 +82,8 @@ public class CommandePipelineService {
         this.commandeRepository = commandeRepository;
         this.eventStore = eventStore;
         this.notificationService = notificationService;
+        this.paiementService = paiementService;
+        this.memoryService = memoryService;
     }
 
     public ResultatPipeline traiterTexte(Commande commande, String texte) {
@@ -178,15 +186,20 @@ public class CommandePipelineService {
                 .filter(c -> c.getStatut() == CommandeStatut.REJETEE)
                 .count();
 
+        Optional<String> preference = memoryService.preferencePour(
+                sauvegardee.getClient().getId(), montantTotal);
+
         BusinessRulesInput input = new BusinessRulesInput(
                 sauvegardee.getClient().getNom(),
                 sauvegardee.getClient().getCreditEnCours(),
                 nbCommandes,
                 nbDefauts,
-                demandes);
+                demandes,
+                preference.orElse(null));
 
         BusinessDecision decision = businessRulesAgent.evaluer(sauvegardee.getId(), input);
-        OrchestrationResult orchestration = orchestratorAgent.orchestrer(sauvegardee, decision);
+        OrchestrationResult orchestration = orchestratorAgent.orchestrer(
+                sauvegardee, decision, preference.isPresent());
 
         return appliquerVerdict(sauvegardee, intention, decision, orchestration);
     }
@@ -245,6 +258,8 @@ public class CommandePipelineService {
      * décision patron).
      */
     public void genererEtEnvoyerDevis(Commande commande) {
+        String lienPaiement = paiementService.genererLienPaiement(commande);
+
         StringBuilder corps = new StringBuilder("Devis MBOA-OPS\n");
         for (LigneCommande ligne : commande.getLignes()) {
             corps.append("- ").append(ligne.getProduit().getNom())
@@ -254,6 +269,7 @@ public class CommandePipelineService {
                     .append(" FCFA\n");
         }
         corps.append("Total : ").append(commande.getMontantTotal()).append(" FCFA");
+        corps.append("\nPayer par Mobile Money : ").append(lienPaiement);
 
         eventStore.append(commande.getId(), "DEVIS_GENERE",
                 Map.of("montantTotal", commande.getMontantTotal(), "devis", corps.toString()),

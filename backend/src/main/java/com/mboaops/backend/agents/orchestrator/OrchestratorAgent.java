@@ -45,8 +45,20 @@ public class OrchestratorAgent {
     }
 
     public OrchestrationResult orchestrer(Commande commande, BusinessDecision decision) {
+        return orchestrer(commande, decision, false);
+    }
+
+    /**
+     * Variante avec préférence patron apprise : quand le patron a déjà
+     * approuvé 3 fois ce pattern (client + plafond), l'irréversibilité liée
+     * au crédit ne force plus le passage par une DecisionCard — c'est
+     * précisément ce que l'apprentissage vise à automatiser.
+     */
+    public OrchestrationResult orchestrer(Commande commande, BusinessDecision decision,
+                                          boolean preferencePatronApplicable) {
         double confidence = appliquerDegradation(commande, decision);
-        boolean actionIrreversible = commande.getClient().getCreditEnCours().compareTo(BigDecimal.ZERO) > 0;
+        boolean actionIrreversible = commande.getClient().getCreditEnCours().compareTo(BigDecimal.ZERO) > 0
+                && !preferencePatronApplicable;
 
         if (confidence > SEUIL_AUTO && !actionIrreversible) {
             eventStore.append(commande.getId(), "ORCHESTRATION_AUTO", decision, confidence, decision.reasoning());

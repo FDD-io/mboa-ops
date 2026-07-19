@@ -11,6 +11,7 @@ import com.mboaops.backend.domain.commande.Commande;
 import com.mboaops.backend.domain.commande.CommandeRepository;
 import com.mboaops.backend.domain.commande.CommandeStatut;
 import com.mboaops.backend.eventstore.EventStore;
+import com.mboaops.backend.memoire.MemoryService;
 import com.mboaops.backend.pipeline.CommandePipelineService;
 import jakarta.validation.Valid;
 import org.springframework.http.HttpStatus;
@@ -39,15 +40,18 @@ public class DecisionController {
     private final DecisionCardRepository decisionCardRepository;
     private final EventStore eventStore;
     private final CommandePipelineService pipeline;
+    private final MemoryService memoryService;
 
     public DecisionController(CommandeRepository commandeRepository,
                               DecisionCardRepository decisionCardRepository,
                               EventStore eventStore,
-                              CommandePipelineService pipeline) {
+                              CommandePipelineService pipeline,
+                              MemoryService memoryService) {
         this.commandeRepository = commandeRepository;
         this.decisionCardRepository = decisionCardRepository;
         this.eventStore = eventStore;
         this.pipeline = pipeline;
+        this.memoryService = memoryService;
     }
 
     @GetMapping("/pending")
@@ -84,6 +88,7 @@ public class DecisionController {
                 card.setActionAppliquee(DecisionCardAction.APPROUVER);
                 commande.changerStatut(CommandeStatut.APPROUVEE);
                 commandeRepository.save(commande);
+                memoryService.enregistrerApprobation(commande);
                 pipeline.genererEtEnvoyerDevis(commande);
             }
             case REJECT -> {

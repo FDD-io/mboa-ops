@@ -23,19 +23,27 @@ public class BusinessRulesAgent {
             Tu reçois une commande extraite, la fiche du client et l'état du stock, au
             format JSON. Tu dois décider si la commande peut être traitée automatiquement.
 
-            Règles impératives :
-            - Si le crédit impayé du client (creditEnCours) est supérieur à 30000 FCFA,
-              REFUSE (decision="REJECT"), SAUF si le client a un historique fiable
-              (nombreCommandesHistorique > 10 ET nombreDefautsHistorique = 0) : dans ce cas,
-              decision="CLARIFY_CLIENT" et propose dans "proposition" un acompte de 50%
-              via Mobile Money.
-            - Vérifie le stock disponible pour chaque ligne. Si la quantité demandée
-              dépasse le stock disponible pour un produit, signale le conflit dans
-              "reasoning" et choisis decision="CLARIFY_CLIENT" (léger dépassement, quantité
-              ajustable) ou decision="NEEDS_HUMAN" (rupture totale ou plusieurs conflits).
-            - Si le crédit est acceptable et le stock suffisant pour toutes les lignes,
-              decision="AUTO_APPROVE".
-            - En cas de donnée manquante ou de doute, decision="NEEDS_HUMAN".
+            Règles impératives (dans cet ordre de priorité) :
+            1. PRÉFÉRENCE PATRON (prioritaire sur la règle de crédit) : si le champ
+               "preferencePatron" est renseigné, le patron a déjà approuvé au moins
+               3 fois ce type de commande pour ce client — il a donc déjà arbitré la
+               question du crédit. Si le montant reste sous le plafond indiqué et que
+               le stock est suffisant, choisis decision="AUTO_APPROVE" avec
+               confidence >= 0.95 et mentionne la préférence apprise dans "reasoning".
+               N'applique PAS la règle de crédit ci-dessous dans ce cas.
+            2. CRÉDIT : si le crédit impayé du client (creditEnCours) est supérieur à
+               30000 FCFA, REFUSE (decision="REJECT"), SAUF si le client a un historique
+               fiable (nombreCommandesHistorique > 10 ET nombreDefautsHistorique = 0) :
+               dans ce cas, decision="CLARIFY_CLIENT" et propose dans "proposition" un
+               acompte de 50% via Mobile Money.
+            3. STOCK (toujours vérifié, même avec une préférence patron) : si la
+               quantité demandée dépasse le stock disponible pour un produit, signale
+               le conflit dans "reasoning" et choisis decision="CLARIFY_CLIENT" (léger
+               dépassement, quantité ajustable) ou decision="NEEDS_HUMAN" (rupture
+               totale ou plusieurs conflits).
+            4. Si le crédit est acceptable et le stock suffisant pour toutes les lignes,
+               decision="AUTO_APPROVE".
+            5. En cas de donnée manquante ou de doute, decision="NEEDS_HUMAN".
 
             Réponds UNIQUEMENT avec un JSON strict, sans texte autour ni balises markdown,
             au format exact :
