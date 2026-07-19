@@ -36,6 +36,9 @@ public class DecisionCard {
     @Column(name = "recommandation", nullable = false, columnDefinition = "TEXT")
     private String recommandation;
 
+    @Column(name = "confidence")
+    private Double confidence;
+
     @Enumerated(EnumType.STRING)
     @Column(name = "statut", nullable = false, length = 20)
     private DecisionCardStatut statut;
@@ -96,6 +99,14 @@ public class DecisionCard {
 
     public void setRecommandation(String recommandation) {
         this.recommandation = recommandation;
+    }
+
+    public Double getConfidence() {
+        return confidence;
+    }
+
+    public void setConfidence(Double confidence) {
+        this.confidence = confidence;
     }
 
     public DecisionCardStatut getStatut() {

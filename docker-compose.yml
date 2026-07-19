@@ -34,5 +34,17 @@ services:
     ports:
       - "8080:8080"
 
+  frontend:
+    build:
+      context: ./frontend
+      args:
+        # URL de l'API vue depuis le NAVIGATEUR (pas depuis le conteneur)
+        VITE_API_URL: ${VITE_API_URL:-http://localhost:8080}
+    restart: unless-stopped
+    depends_on:
+      - backend
+    ports:
+      - "3000:80"
+
 volumes:
   postgres_data:

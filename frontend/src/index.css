@@ -1,0 +1,31 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  html {
+    @apply antialiased;
+  }
+  body {
+    @apply bg-slate-100 text-slate-900;
+  }
+}
+
+/* Fond du chat façon WhatsApp : trame diagonale très discrète */
+.chat-canvas {
+  background-color: #ece5dd;
+  background-image: repeating-linear-gradient(
+    45deg,
+    rgba(0, 0, 0, 0.015) 0px,
+    rgba(0, 0, 0, 0.015) 1px,
+    transparent 1px,
+    transparent 12px
+  );
+}
+
+.scrollbar-thin::-webkit-scrollbar {
+  width: 6px;
+}
+.scrollbar-thin::-webkit-scrollbar-thumb {
+  @apply rounded-full bg-slate-300;
+}

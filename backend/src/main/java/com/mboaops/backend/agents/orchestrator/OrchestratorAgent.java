@@ -108,6 +108,7 @@ public class OrchestratorAgent {
                 : decision.reasoning();
 
         DecisionCard card = new DecisionCard(commande, resume, recommandation);
+        card.setConfidence(confidence);
         return decisionCardRepository.save(card);
     }
 }

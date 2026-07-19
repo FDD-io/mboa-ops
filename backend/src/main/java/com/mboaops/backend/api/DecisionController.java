@@ -4,9 +4,9 @@ import com.mboaops.backend.agents.orchestrator.DecisionCard;
 import com.mboaops.backend.agents.orchestrator.DecisionCardAction;
 import com.mboaops.backend.agents.orchestrator.DecisionCardRepository;
 import com.mboaops.backend.agents.orchestrator.DecisionCardStatut;
-import com.mboaops.backend.api.dto.CommandeDto;
 import com.mboaops.backend.api.dto.DecisionActionRequest;
 import com.mboaops.backend.api.dto.DecisionActionResponse;
+import com.mboaops.backend.api.dto.DecisionCardDto;
 import com.mboaops.backend.domain.commande.Commande;
 import com.mboaops.backend.domain.commande.CommandeRepository;
 import com.mboaops.backend.domain.commande.CommandeStatut;
@@ -54,11 +54,13 @@ public class DecisionController {
         this.memoryService = memoryService;
     }
 
+    /** Cartes de décision en attente du patron, avec résumé, recommandation
+     *  et score de confiance (déjà dégradé le cas échéant). */
     @GetMapping("/pending")
     @Transactional(readOnly = true)
-    public List<CommandeDto> pending() {
-        return commandeRepository.findByStatut(CommandeStatut.EN_ATTENTE_PATRON).stream()
-                .map(CommandeDto::from)
+    public List<DecisionCardDto> pending() {
+        return decisionCardRepository.findByStatut(DecisionCardStatut.PENDING).stream()
+                .map(DecisionCardDto::from)
                 .toList();
     }
 
