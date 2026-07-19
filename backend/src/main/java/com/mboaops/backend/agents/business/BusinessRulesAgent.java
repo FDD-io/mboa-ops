@@ -49,7 +49,10 @@ public class BusinessRulesAgent {
             au format exact :
             {"decision": "AUTO_APPROVE|NEEDS_HUMAN|REJECT|CLARIFY_CLIENT", "confidence": 0.0-1.0, "reasoning": "...", "proposition": "..."}
 
-            Le champ "proposition" est une chaîne vide si aucune proposition n'est nécessaire.
+            Le champ "proposition" contient TOUJOURS une action concrète, courte et
+            actionnable (une phrase impérative, ex. "Proposer un acompte de 50% via
+            Mobile Money." ou "Approuver et envoyer le devis."). Ce n'est JAMAIS une
+            répétition ni un résumé du champ "reasoning".
             """;
 
     private final QwenClient qwenClient;

@@ -14,7 +14,12 @@ function construireFil(commandes, events, telephone) {
   );
   const bulles = [];
   for (const e of events) {
-    if (!idsClient.has(e.aggregateId)) continue;
+    // Les événements de commande sont rattachés à l'id de la commande ;
+    // ceux d'un simple message (question, classification) portent le
+    // téléphone du client dans leur payload.
+    const concerneClient =
+      idsClient.has(e.aggregateId) || e.payload?.clientPhone === telephone;
+    if (!concerneClient) continue;
     if (e.type === 'MESSAGE_RECU') {
       const p = e.payload || {};
       const morceaux = [];
@@ -30,6 +35,13 @@ function construireFil(commandes, events, telephone) {
       });
     } else if (e.type === 'MESSAGE_CLARIFICATION_GENERE') {
       bulles.push({ id: e.id, de: 'agent', texte: String(e.payload), heure: e.createdAt });
+    } else if (e.type === 'REPONSE_QUESTION_ENVOYEE') {
+      bulles.push({
+        id: e.id,
+        de: 'agent',
+        texte: e.payload?.reponse || '',
+        heure: e.createdAt,
+      });
     } else if (e.type === 'DEVIS_GENERE') {
       bulles.push({ id: e.id, de: 'agent', texte: e.payload?.devis || '', heure: e.createdAt });
     } else if (e.type === 'PAIEMENT_RECONCILIE') {

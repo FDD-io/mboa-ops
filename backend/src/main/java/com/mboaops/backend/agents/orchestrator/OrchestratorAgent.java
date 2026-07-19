@@ -103,9 +103,11 @@ public class OrchestratorAgent {
                         + " - Montant " + commande.getMontantTotal() + " FCFA",
                 "Décision suggérée : " + decision.decision() + " (confiance " + Math.round(confidence * 100) + "%)",
                 decision.reasoning());
+        // La recommandation est l'action proposée, jamais une redite du
+        // raisonnement (déjà présent dans le résumé).
         String recommandation = (decision.proposition() != null && !decision.proposition().isBlank())
                 ? decision.proposition()
-                : decision.reasoning();
+                : "Décision manuelle requise — voir le résumé ci-dessus.";
 
         DecisionCard card = new DecisionCard(commande, resume, recommandation);
         card.setConfidence(confidence);

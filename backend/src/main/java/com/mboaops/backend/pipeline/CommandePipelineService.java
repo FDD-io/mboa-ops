@@ -9,9 +9,11 @@ import com.mboaops.backend.agents.fusion.FusionResult;
 import com.mboaops.backend.agents.fusion.FusionService;
 import com.mboaops.backend.agents.orchestrator.OrchestrationResult;
 import com.mboaops.backend.agents.orchestrator.OrchestratorAgent;
+import com.mboaops.backend.agents.qwen.QwenClient;
 import com.mboaops.backend.agents.router.Intention;
 import com.mboaops.backend.agents.router.RouterAgent;
 import com.mboaops.backend.agents.router.RouterDecision;
+import com.mboaops.backend.domain.client.Client;
 import com.mboaops.backend.domain.commande.Commande;
 import com.mboaops.backend.domain.commande.CommandeRepository;
 import com.mboaops.backend.domain.commande.CommandeStatut;
@@ -32,20 +34,51 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
+import java.util.stream.Collectors;
 
 /**
- * Chaîne complète de traitement d'un message entrant :
- * MESSAGE_RECU -> RouterAgent -> [si COMMANDE] extraction (texte ou
- * multimodal) -> fusion/conflits -> BusinessRulesAgent (stock + crédit)
- * -> politique HITL de l'orchestrateur -> application du verdict
- * (auto-approbation + devis, DecisionCard, ou escalade). Chaque étape
- * journalise ses événements dans l'event store.
+ * Chaîne complète de traitement d'un message entrant. Le routeur classifie
+ * d'abord le message sur l'agrégat du MESSAGE lui-même : une commande n'est
+ * créée QUE si l'intention est COMMANDE (une QUESTION reçoit une réponse
+ * catalogue directe, sans commande fantôme). Ensuite : extraction ->
+ * fusion/conflits -> résolution catalogue (produit inconnu = clarification
+ * client, pas de patron) -> règles métier (stock + crédit) -> politique
+ * HITL -> application du verdict. Chaque étape journalise ses événements.
  *
  * Volontairement hors transaction globale : chaque étape persiste son
  * propre état pour ne pas tenir de connexion pendant les appels LLM.
  */
 @Service
 public class CommandePipelineService {
+
+    private static final String PROMPT_QUESTION = """
+            Tu es le vendeur WhatsApp de MBOA-OPS, une quincaillerie camerounaise.
+            Ton chaleureux de commerçant camerounais (maman, papa, mon frère...).
+            Réponds à la question du client en t'appuyant UNIQUEMENT sur le
+            catalogue des produits disponibles ci-dessous (nom et prix en FCFA).
+            Réponds en 2 à 4 phrases maximum, style message WhatsApp, sans markdown.
+
+            Catalogue disponible :
+            %s
+
+            Question du client : "%s"
+            """;
+
+    private static final String PROMPT_PRODUIT_INCONNU = """
+            Tu es le vendeur WhatsApp de MBOA-OPS, une quincaillerie camerounaise.
+            Un client demande des produits que nous ne vendons PAS : %s.
+            %s
+            Rédige UN SEUL court message WhatsApp (2-3 phrases max), ton chaleureux
+            camerounais ("Désolé maman/papa..."), qui :
+            - explique qu'on ne vend pas ce(s) produit(s) ;
+            - propose 2 ou 3 produits proches du catalogue ci-dessous SI pertinent,
+              sinon invite à consulter le catalogue ;
+            - si des produits connus sont gardés de côté, le dit clairement.
+            Réponds uniquement avec le message, sans guillemets ni markdown.
+
+            Catalogue disponible :
+            %s
+            """;
 
     private final RouterAgent routerAgent;
     private final ExtractionAgent extractionAgent;
@@ -59,6 +92,7 @@ public class CommandePipelineService {
     private final NotificationService notificationService;
     private final PaiementService paiementService;
     private final MemoryService memoryService;
+    private final QwenClient qwenClient;
 
     public CommandePipelineService(RouterAgent routerAgent,
                                    ExtractionAgent extractionAgent,
@@ -71,7 +105,8 @@ public class CommandePipelineService {
                                    EventStore eventStore,
                                    NotificationService notificationService,
                                    PaiementService paiementService,
-                                   MemoryService memoryService) {
+                                   MemoryService memoryService,
+                                   QwenClient qwenClient) {
         this.routerAgent = routerAgent;
         this.extractionAgent = extractionAgent;
         this.fusionService = fusionService;
@@ -84,27 +119,35 @@ public class CommandePipelineService {
         this.notificationService = notificationService;
         this.paiementService = paiementService;
         this.memoryService = memoryService;
+        this.qwenClient = qwenClient;
     }
 
-    public ResultatPipeline traiterTexte(Commande commande, String texte) {
-        RouterDecision routage = routerAgent.classifier(commande.getId(), texte);
-        if (routage.intention() != Intention.COMMANDE) {
-            return new ResultatPipeline(commande.getStatut().name(),
-                    routage.intention().name(), null, null, null);
+    public ResultatPipeline traiterMessageTexte(Client client, UUID messageId, String texte) {
+        RouterDecision routage = routerAgent.classifier(messageId, texte);
+        if (routage.intention() == Intention.QUESTION) {
+            String reponse = repondreQuestion(messageId, client, texte);
+            return new ResultatPipeline(null, null, Intention.QUESTION.name(), null, null, reponse);
         }
+        if (routage.intention() != Intention.COMMANDE) {
+            return new ResultatPipeline(null, null, routage.intention().name(), null, null, null);
+        }
+
+        Commande commande = commandeRepository.save(
+                new Commande(client, CommandeStatut.RECUE, BigDecimal.ZERO));
         List<ExtractionLigne> lignes = extractionAgent.extractFromTexte(commande.getId(), texte);
-        return pipelineCommande(commande, routage.intention().name(), lignes, List.of());
+        return pipelineCommande(commande, Intention.COMMANDE.name(), lignes, List.of());
     }
 
-    public ResultatPipeline traiterMultimodal(Commande commande,
-                                              String texte,
-                                              String audioBase64,
-                                              String audioFormat,
-                                              String imageBase64,
-                                              String imageMimeType) {
+    public ResultatPipeline traiterMessageMultimodal(Client client,
+                                                     UUID messageId,
+                                                     String texte,
+                                                     String audioBase64,
+                                                     String audioFormat,
+                                                     String imageBase64,
+                                                     String imageMimeType) {
         String transcript = null;
         if (audioBase64 != null) {
-            transcript = extractionAgent.transcribeAudio(commande.getId(), audioBase64, audioFormat);
+            transcript = extractionAgent.transcribeAudio(messageId, audioBase64, audioFormat);
         }
 
         // Le routeur classifie le texte disponible (message écrit ou
@@ -113,12 +156,19 @@ public class CommandePipelineService {
         String texteRouter = (texte != null && !texte.isBlank()) ? texte : transcript;
         String intention = Intention.COMMANDE.name();
         if (texteRouter != null && !texteRouter.isBlank()) {
-            RouterDecision routage = routerAgent.classifier(commande.getId(), texteRouter);
+            RouterDecision routage = routerAgent.classifier(messageId, texteRouter);
             intention = routage.intention().name();
+            if (routage.intention() == Intention.QUESTION) {
+                String reponse = repondreQuestion(messageId, client, texteRouter);
+                return new ResultatPipeline(null, null, intention, null, null, reponse);
+            }
             if (routage.intention() != Intention.COMMANDE) {
-                return new ResultatPipeline(commande.getStatut().name(), intention, null, null, null);
+                return new ResultatPipeline(null, null, intention, null, null, null);
             }
         }
+
+        Commande commande = commandeRepository.save(
+                new Commande(client, CommandeStatut.RECUE, BigDecimal.ZERO));
 
         List<ExtractionLigne> depuisAudio = List.of();
         if (transcript != null && !transcript.isBlank()) {
@@ -132,6 +182,33 @@ public class CommandePipelineService {
         return pipelineCommande(commande, intention, depuisAudio, depuisImage);
     }
 
+    /**
+     * Répond directement à une question client (prix, disponibilité...) avec
+     * le catalogue en stock, sans jamais créer de commande.
+     */
+    private String repondreQuestion(UUID messageId, Client client, String question) {
+        String reponse;
+        String reasoning = null;
+        try {
+            reponse = qwenClient
+                    .callFast(PROMPT_QUESTION.formatted(catalogueDisponible(), question))
+                    .trim();
+        } catch (Exception e) {
+            reponse = "Bonjour ! Nous avons tout pour la maison et le chantier "
+                    + "(ciment, tôles, peinture, savon...). Passez voir le catalogue "
+                    + "ou dites-moi ce que vous cherchez !";
+            reasoning = "Fallback statique, échec de l'appel Qwen : " + e.getMessage();
+        }
+
+        eventStore.append(messageId, "REPONSE_QUESTION_ENVOYEE",
+                Map.of("clientPhone", client.getTelephone(),
+                        "question", question,
+                        "reponse", reponse),
+                null, reasoning);
+        notificationService.envoyer(messageId, client.getTelephone(), reponse);
+        return reponse;
+    }
+
     private ResultatPipeline pipelineCommande(Commande commande,
                                               String intention,
                                               List<ExtractionLigne> depuisAudio,
@@ -139,15 +216,16 @@ public class CommandePipelineService {
         if (depuisAudio.isEmpty() && depuisImage.isEmpty()) {
             // Rien d'exploitable : la commande reste RECUE, un humain prendra
             // le relais.
-            return new ResultatPipeline(commande.getStatut().name(), intention, null, null, null);
+            return new ResultatPipeline(commande.getId(), commande.getStatut().name(),
+                    intention, null, null, null);
         }
 
         FusionResult fusion = fusionService.fusionner(commande, depuisAudio, depuisImage);
         if (fusion.aDesConflits()) {
             notificationService.envoyer(commande.getId(),
                     commande.getClient().getTelephone(), fusion.messageClarification());
-            return new ResultatPipeline(commande.getStatut().name(), intention,
-                    null, null, fusion.messageClarification());
+            return new ResultatPipeline(commande.getId(), commande.getStatut().name(),
+                    intention, null, null, fusion.messageClarification());
         }
 
         return evaluerEtOrchestrer(commande, intention, fusion.lignes());
@@ -157,26 +235,38 @@ public class CommandePipelineService {
                                                  String intention,
                                                  List<ExtractionLigne> lignes) {
         List<BusinessRulesInput.LigneDemandee> demandes = new ArrayList<>();
+        List<ExtractionLigne> inconnues = new ArrayList<>();
+        List<String> connuesNoms = new ArrayList<>();
         BigDecimal montantTotal = BigDecimal.ZERO;
 
         for (ExtractionLigne ligne : lignes) {
             Optional<Produit> produit = chercherProduitAvecFallback(ligne.produit());
-            int stock = produit.map(Produit::getStock).orElse(0);
-            BigDecimal prix = produit.map(Produit::getPrixUnitaire).orElse(BigDecimal.ZERO);
-
-            demandes.add(new BusinessRulesInput.LigneDemandee(
-                    ligne.produit(), ligne.quantite(), stock, prix));
-
-            if (produit.isPresent()) {
-                commande.getLignes().add(new LigneCommande(
-                        commande, produit.get(), ligne.quantite(), produit.get().getPrixUnitaire()));
-                montantTotal = montantTotal.add(
-                        prix.multiply(BigDecimal.valueOf(ligne.quantite())));
+            if (produit.isEmpty()) {
+                inconnues.add(ligne);
+                continue;
             }
+            demandes.add(new BusinessRulesInput.LigneDemandee(
+                    ligne.produit(), ligne.quantite(),
+                    produit.get().getStock(), produit.get().getPrixUnitaire()));
+            connuesNoms.add(produit.get().getNom());
+            commande.getLignes().add(new LigneCommande(
+                    commande, produit.get(), ligne.quantite(), produit.get().getPrixUnitaire()));
+            montantTotal = montantTotal.add(
+                    produit.get().getPrixUnitaire().multiply(BigDecimal.valueOf(ligne.quantite())));
         }
 
         commande.setMontantTotal(montantTotal);
         Commande sauvegardee = commandeRepository.save(commande);
+
+        // Produit hors catalogue : clarification directe avec le client, le
+        // patron n'est pas sollicité. Les produits connus restent persistés
+        // sur la commande, en attente de la réponse du client.
+        if (!inconnues.isEmpty()) {
+            return clarifierProduitsInconnus(sauvegardee, intention, inconnues, connuesNoms);
+        }
+
+        Optional<String> preference = memoryService.preferencePour(
+                sauvegardee.getClient().getId(), montantTotal);
 
         List<Commande> historique = commandeRepository.findByClientId(sauvegardee.getClient().getId());
         int nbCommandes = (int) historique.stream()
@@ -185,9 +275,6 @@ public class CommandePipelineService {
         int nbDefauts = (int) historique.stream()
                 .filter(c -> c.getStatut() == CommandeStatut.REJETEE)
                 .count();
-
-        Optional<String> preference = memoryService.preferencePour(
-                sauvegardee.getClient().getId(), montantTotal);
 
         BusinessRulesInput input = new BusinessRulesInput(
                 sauvegardee.getClient().getNom(),
@@ -202,6 +289,47 @@ public class CommandePipelineService {
                 sauvegardee, decision, preference.isPresent());
 
         return appliquerVerdict(sauvegardee, intention, decision, orchestration);
+    }
+
+    private ResultatPipeline clarifierProduitsInconnus(Commande commande,
+                                                       String intention,
+                                                       List<ExtractionLigne> inconnues,
+                                                       List<String> connuesNoms) {
+        List<String> nomsInconnus = inconnues.stream()
+                .map(l -> l.quantite() + " x " + l.produit())
+                .toList();
+        eventStore.append(commande.getId(), "PRODUIT_INCONNU",
+                Map.of("produitsInconnus", nomsInconnus, "produitsConserves", connuesNoms),
+                null, "Produit(s) hors catalogue : clarification directe avec le client, "
+                        + "sans solliciter le patron");
+
+        commande.changerStatut(CommandeStatut.EN_CLARIFICATION);
+        commandeRepository.save(commande);
+
+        String contexteConnus = connuesNoms.isEmpty()
+                ? "Aucun autre produit dans la demande."
+                : "Le client a aussi commandé des produits que nous VENDONS et que nous "
+                        + "gardons de côté : " + String.join(", ", connuesNoms) + ".";
+
+        String message;
+        String reasoning = null;
+        try {
+            message = qwenClient.callFast(PROMPT_PRODUIT_INCONNU.formatted(
+                    String.join(", ", nomsInconnus), contexteConnus, catalogueDisponible())).trim();
+        } catch (Exception e) {
+            String produits = inconnues.stream().map(ExtractionLigne::produit)
+                    .collect(Collectors.joining(", "));
+            message = "Désolé maman, nous ne vendons pas de " + produits
+                    + ". Jetez un œil à notre catalogue et dites-moi ce qu'il vous faut !";
+            reasoning = "Fallback statique, échec de l'appel Qwen : " + e.getMessage();
+        }
+
+        eventStore.append(commande.getId(), "MESSAGE_CLARIFICATION_GENERE", message, null, reasoning);
+        notificationService.envoyer(commande.getId(),
+                commande.getClient().getTelephone(), message);
+
+        return new ResultatPipeline(commande.getId(), commande.getStatut().name(),
+                intention, null, null, message);
     }
 
     private ResultatPipeline appliquerVerdict(Commande commande,
@@ -241,8 +369,8 @@ public class CommandePipelineService {
             case DECISION_CARD, ESCALADE -> mettreEnAttentePatron(commande);
         }
 
-        return new ResultatPipeline(commande.getStatut().name(), intention,
-                decision.decision().name(), cardId, null);
+        return new ResultatPipeline(commande.getId(), commande.getStatut().name(),
+                intention, decision.decision().name(), cardId, null);
     }
 
     private void mettreEnAttentePatron(Commande commande) {
@@ -279,6 +407,13 @@ public class CommandePipelineService {
 
         commande.changerStatut(CommandeStatut.DEVIS_ENVOYE);
         commandeRepository.save(commande);
+    }
+
+    private String catalogueDisponible() {
+        return produitRepository.findAll().stream()
+                .filter(p -> p.getStock() > 0)
+                .map(p -> "- " + p.getNom() + " : " + p.getPrixUnitaire() + " FCFA")
+                .collect(Collectors.joining("\n"));
     }
 
     /**
