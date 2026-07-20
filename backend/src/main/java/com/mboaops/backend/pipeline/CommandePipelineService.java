@@ -3,6 +3,7 @@ package com.mboaops.backend.pipeline;
 import com.mboaops.backend.agents.business.BusinessDecision;
 import com.mboaops.backend.agents.business.BusinessRulesAgent;
 import com.mboaops.backend.agents.business.BusinessRulesInput;
+import com.mboaops.backend.agents.business.DecisionType;
 import com.mboaops.backend.agents.extraction.ExtractionAgent;
 import com.mboaops.backend.agents.extraction.ExtractionLigne;
 import com.mboaops.backend.agents.fusion.FusionResult;
@@ -13,6 +14,9 @@ import com.mboaops.backend.agents.qwen.QwenClient;
 import com.mboaops.backend.agents.router.Intention;
 import com.mboaops.backend.agents.router.RouterAgent;
 import com.mboaops.backend.agents.router.RouterDecision;
+import com.mboaops.backend.conversation.ConversationContext;
+import com.mboaops.backend.conversation.ConversationService;
+import com.mboaops.backend.conversation.ConversationStatut;
 import com.mboaops.backend.domain.client.Client;
 import com.mboaops.backend.domain.commande.Commande;
 import com.mboaops.backend.domain.commande.CommandeRepository;
@@ -28,29 +32,37 @@ import com.mboaops.backend.paiements.PaiementService;
 import org.springframework.stereotype.Service;
 
 import java.math.BigDecimal;
+import java.text.Normalizer;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.stream.Collectors;
 
 /**
- * Chaîne complète de traitement d'un message entrant. Le routeur classifie
- * d'abord le message sur l'agrégat du MESSAGE lui-même : une commande n'est
- * créée QUE si l'intention est COMMANDE (une QUESTION reçoit une réponse
- * catalogue directe, sans commande fantôme). Ensuite : extraction ->
- * fusion/conflits -> résolution catalogue (produit inconnu = clarification
- * client, pas de patron) -> règles métier (stock + crédit) -> politique
- * HITL -> application du verdict. Chaque étape journalise ses événements.
+ * Chaîne complète de traitement d'un message entrant, avec MÉMOIRE
+ * CONVERSATIONNELLE. Avant tout routage, on vérifie s'il existe un contexte
+ * actif pour ce client : si oui, le message est interprété comme une réponse
+ * au sujet en cours (ex. "5 barres" après "vous avez du fer à béton ?"),
+ * pas comme un nouveau sujet isolé. Sinon : le routeur classifie, une
+ * commande n'est créée que pour une intention COMMANDE, une QUESTION reçoit
+ * une réponse catalogue (et ouvre un contexte si elle porte sur un produit
+ * précis). Ensuite : extraction -> fusion -> catalogue -> règles métier
+ * (crédit + stock) -> politique HITL. Chaque étape journalise ses événements.
  *
- * Volontairement hors transaction globale : chaque étape persiste son
- * propre état pour ne pas tenir de connexion pendant les appels LLM.
+ * Volontairement hors transaction globale : chaque étape persiste son propre
+ * état pour ne pas tenir de connexion pendant les appels LLM.
  */
 @Service
 public class CommandePipelineService {
+
+    private static final Set<String> STOPWORDS = Set.of(
+            "chantier", "maison", "travaux", "pour", "avec", "votre", "vos", "avez");
 
     private static final String PROMPT_QUESTION = """
             Tu es le vendeur WhatsApp de MBOA-OPS, une quincaillerie camerounaise.
@@ -92,6 +104,24 @@ public class CommandePipelineService {
             %s
             """;
 
+    private static final String PROMPT_REFUS = """
+            Tu es le vendeur WhatsApp de MBOA-OPS, une quincaillerie camerounaise.
+            Rédige UN SEUL message court (max 3 phrases), ton chaleureux camerounais,
+            pour refuser poliment une commande. Motif à expliquer simplement : %s.
+            Reste positif et invite à revenir. Réponds uniquement avec le message,
+            sans guillemets ni markdown.
+            """;
+
+    private static final String PROMPT_REFORMULATION = """
+            Tu es le vendeur WhatsApp de MBOA-OPS. Le patron a répondu à une demande
+            client (action=%s, commentaire du patron="%s").
+            Reformule cette décision en UN SEUL message WhatsApp chaleureux et naturel
+            POUR LE CLIENT, à la première personne du vendeur, maximum 3 phrases.
+            Ne cite JAMAIS le patron mot pour mot, n'emploie aucun terme interne.
+            Si une condition (acompte, pourcentage) est mentionnée, explique-la
+            simplement. Réponds uniquement avec le message, sans guillemets ni markdown.
+            """;
+
     private final RouterAgent routerAgent;
     private final ExtractionAgent extractionAgent;
     private final FusionService fusionService;
@@ -104,6 +134,7 @@ public class CommandePipelineService {
     private final NotificationService notificationService;
     private final PaiementService paiementService;
     private final MemoryService memoryService;
+    private final ConversationService conversationService;
     private final QwenClient qwenClient;
 
     public CommandePipelineService(RouterAgent routerAgent,
@@ -118,6 +149,7 @@ public class CommandePipelineService {
                                    NotificationService notificationService,
                                    PaiementService paiementService,
                                    MemoryService memoryService,
+                                   ConversationService conversationService,
                                    QwenClient qwenClient) {
         this.routerAgent = routerAgent;
         this.extractionAgent = extractionAgent;
@@ -131,23 +163,19 @@ public class CommandePipelineService {
         this.notificationService = notificationService;
         this.paiementService = paiementService;
         this.memoryService = memoryService;
+        this.conversationService = conversationService;
         this.qwenClient = qwenClient;
     }
 
     public ResultatPipeline traiterMessageTexte(Client client, UUID messageId, String texte) {
-        RouterDecision routage = routerAgent.classifier(messageId, texte);
-        if (routage.intention() == Intention.QUESTION) {
-            String reponse = repondreQuestion(messageId, client, texte);
-            return new ResultatPipeline(null, null, Intention.QUESTION.name(), null, null, reponse);
+        Optional<ConversationContext> contexte = conversationService.contexteActif(client.getTelephone());
+        if (contexte.isPresent()) {
+            ResultatPipeline suite = poursuivreConversation(client, messageId, texte, contexte.get());
+            if (suite != null) {
+                return suite;
+            }
         }
-        if (routage.intention() != Intention.COMMANDE) {
-            return new ResultatPipeline(null, null, routage.intention().name(), null, null, null);
-        }
-
-        Commande commande = commandeRepository.save(
-                new Commande(client, CommandeStatut.RECUE, BigDecimal.ZERO));
-        List<ExtractionLigne> lignes = extractionAgent.extractFromTexte(commande.getId(), texte);
-        return pipelineCommande(commande, Intention.COMMANDE.name(), lignes, List.of());
+        return routerEtTraiter(client, messageId, texte);
     }
 
     public ResultatPipeline traiterMessageMultimodal(Client client,
@@ -179,7 +207,7 @@ public class CommandePipelineService {
             RouterDecision routage = routerAgent.classifier(messageId, texteRouter);
             intention = routage.intention().name();
             if (routage.intention() == Intention.QUESTION) {
-                String reponse = repondreQuestion(messageId, client, texteRouter);
+                String reponse = repondreQuestionEtOuvrirContexte(messageId, client, texteRouter);
                 return new ResultatPipeline(null, null, intention, null, null, reponse);
             }
             if (routage.intention() != Intention.COMMANDE) {
@@ -196,7 +224,86 @@ public class CommandePipelineService {
         }
         List<ExtractionLigne> depuisImage = futurImage.join();
 
-        return pipelineCommande(commande, intention, depuisAudio, depuisImage);
+        return pipelineCommande(commande, intention, depuisAudio, depuisImage, texteRouter);
+    }
+
+    // --- Mémoire conversationnelle -----------------------------------------
+
+    /**
+     * Poursuit un échange en cours. Retourne null si le contexte n'implique
+     * aucune poursuite particulière (le routage normal reprend la main).
+     */
+    private ResultatPipeline poursuivreConversation(Client client, UUID messageId,
+                                                    String texte, ConversationContext contexte) {
+        if (contexte.getStatut() == ConversationStatut.EN_ATTENTE_CONFIRMATION) {
+            String msg = "Votre demande est toujours chez le patron, je reviens vers vous "
+                    + "dès qu'il me répond 🙏";
+            eventStore.append(messageId, "MESSAGE_ATTENTE_ENVOYE",
+                    Map.of("message", msg, "clientPhone", client.getTelephone()), null,
+                    "Client relance pendant l'attente patron");
+            notificationService.envoyer(messageId, client.getTelephone(), msg);
+            return new ResultatPipeline(null, null, "SUIVI", null, null, msg);
+        }
+
+        if (contexte.getStatut() == ConversationStatut.EN_PRECISION) {
+            eventStore.append(messageId, "MESSAGE_INTERPRETE_COMME_SUIVI",
+                    Map.of("clientPhone", client.getTelephone(),
+                            "sujet", contexte.getSujet() == null ? "" : contexte.getSujet(),
+                            "message", texte),
+                    null, "Message interprété comme réponse au sujet en cours");
+
+            Commande commande = commandeRepository.save(
+                    new Commande(client, CommandeStatut.RECUE, BigDecimal.ZERO));
+            List<ExtractionLigne> lignes = extractionAgent.extractAvecContexte(
+                    commande.getId(), contexte.getSujet(), texte);
+            if (lignes.isEmpty()) {
+                // Réponse inexploitable : on garde le sujet ouvert et on relance.
+                commande.changerStatut(CommandeStatut.REJETEE);
+                commandeRepository.save(commande);
+                String msg = "Pardon, je n'ai pas bien saisi. Vous voulez combien exactement ?";
+                eventStore.append(commande.getId(), "MESSAGE_CLARIFICATION_GENERE",
+                        Map.of("message", msg), null, "Réponse de suivi inexploitable");
+                notificationService.envoyer(commande.getId(), client.getTelephone(), msg);
+                return new ResultatPipeline(commande.getId(), commande.getStatut().name(),
+                        "COMMANDE", null, null, msg);
+            }
+            return pipelineCommande(commande, Intention.COMMANDE.name(), lignes, List.of(), texte);
+        }
+
+        return null;
+    }
+
+    private ResultatPipeline routerEtTraiter(Client client, UUID messageId, String texte) {
+        RouterDecision routage = routerAgent.classifier(messageId, texte);
+        if (routage.intention() == Intention.QUESTION) {
+            String reponse = repondreQuestionEtOuvrirContexte(messageId, client, texte);
+            return new ResultatPipeline(null, null, Intention.QUESTION.name(), null, null, reponse);
+        }
+        if (routage.intention() != Intention.COMMANDE) {
+            return new ResultatPipeline(null, null, routage.intention().name(), null, null, null);
+        }
+
+        Commande commande = commandeRepository.save(
+                new Commande(client, CommandeStatut.RECUE, BigDecimal.ZERO));
+        List<ExtractionLigne> lignes = extractionAgent.extractFromTexte(commande.getId(), texte);
+        return pipelineCommande(commande, Intention.COMMANDE.name(), lignes, List.of(), texte);
+    }
+
+    /**
+     * Répond à une question client puis, si elle porte sur un produit précis
+     * du catalogue, ouvre un contexte EN_PRECISION : la prochaine réponse du
+     * client (une quantité) complètera la commande sur ce produit.
+     */
+    private String repondreQuestionEtOuvrirContexte(UUID messageId, Client client, String question) {
+        String reponse = repondreQuestion(messageId, client, question);
+        Optional<Produit> produit = identifierProduitQuestion(question);
+        if (produit.isPresent()) {
+            String sujet = produit.get().getNom() + " (" + produit.get().getPrixUnitaire()
+                    + " FCFA) — en attente de la quantité souhaitée par le client";
+            conversationService.ouvrirPrecision(client.getTelephone(), sujet,
+                    List.of(produit.get().getNom()), null);
+        }
+        return reponse;
     }
 
     /**
@@ -229,10 +336,13 @@ public class CommandePipelineService {
         return reponse;
     }
 
+    // --- Pipeline commande --------------------------------------------------
+
     private ResultatPipeline pipelineCommande(Commande commande,
                                               String intention,
                                               List<ExtractionLigne> depuisAudio,
-                                              List<ExtractionLigne> depuisImage) {
+                                              List<ExtractionLigne> depuisImage,
+                                              String messageClient) {
         if (depuisAudio.isEmpty() && depuisImage.isEmpty()) {
             // Rien d'exploitable : la commande reste RECUE, un humain prendra
             // le relais.
@@ -244,16 +354,20 @@ public class CommandePipelineService {
         if (fusion.aDesConflits()) {
             notificationService.envoyer(commande.getId(),
                     commande.getClient().getTelephone(), fusion.messageClarification());
+            conversationService.ouvrirPrecision(commande.getClient().getTelephone(),
+                    "Conflit de quantité à clarifier : " + fusion.messageClarification(),
+                    List.of(), commande.getId());
             return new ResultatPipeline(commande.getId(), commande.getStatut().name(),
                     intention, null, null, fusion.messageClarification());
         }
 
-        return evaluerEtOrchestrer(commande, intention, fusion.lignes());
+        return evaluerEtOrchestrer(commande, intention, fusion.lignes(), messageClient);
     }
 
     private ResultatPipeline evaluerEtOrchestrer(Commande commande,
                                                  String intention,
-                                                 List<ExtractionLigne> lignes) {
+                                                 List<ExtractionLigne> lignes,
+                                                 String messageClient) {
         List<BusinessRulesInput.LigneDemandee> demandes = new ArrayList<>();
         List<ExtractionLigne> inconnues = new ArrayList<>();
         List<String> connuesNoms = new ArrayList<>();
@@ -293,8 +407,10 @@ public class CommandePipelineService {
                 .filter(c -> !c.getId().equals(sauvegardee.getId()))
                 .count();
         int nbDefauts = (int) historique.stream()
-                .filter(c -> c.getStatut() == CommandeStatut.REJETEE)
+                .filter(c -> c.getStatut() == CommandeStatut.REJETEE
+                        && !c.getId().equals(sauvegardee.getId()))
                 .count();
+        boolean nouveauClient = nbCommandes == 0;
 
         BusinessRulesInput input = new BusinessRulesInput(
                 sauvegardee.getClient().getNom(),
@@ -302,9 +418,21 @@ public class CommandePipelineService {
                 nbCommandes,
                 nbDefauts,
                 demandes,
-                preference.orElse(null));
+                preference.orElse(null),
+                messageClient);
 
         BusinessDecision decision = businessRulesAgent.evaluer(sauvegardee.getId(), input);
+
+        // Garde-fou déterministe : un nouveau client (aucun historique) qui a
+        // un crédit en cours ou en demande un est refusé sans jamais solliciter
+        // le patron, quelle que soit la sortie du modèle.
+        boolean demandeCredit = demandeCreditDetectee(messageClient);
+        boolean creditNouveauClient = nouveauClient
+                && (sauvegardee.getClient().getCreditEnCours().signum() > 0 || demandeCredit);
+        if (creditNouveauClient || (nouveauClient && decision.decision() != DecisionType.AUTO_APPROVE)) {
+            return rejeterNouveauClient(sauvegardee, intention);
+        }
+
         OrchestrationResult orchestration = orchestratorAgent.orchestrer(
                 sauvegardee, decision, preference.isPresent());
 
@@ -351,9 +479,39 @@ public class CommandePipelineService {
                 Map.of("message", message, "durationMs", durationMs), null, reasoning);
         notificationService.envoyer(commande.getId(),
                 commande.getClient().getTelephone(), message);
+        conversationService.ouvrirPrecision(commande.getClient().getTelephone(),
+                "Produit(s) inconnu(s) à clarifier ; produits conservés : "
+                        + String.join(", ", connuesNoms), connuesNoms, commande.getId());
 
         return new ResultatPipeline(commande.getId(), commande.getStatut().name(),
                 intention, null, null, message);
+    }
+
+    /**
+     * Nouveau client (aucun historique) refusé pour une demande de crédit : le
+     * patron n'est jamais sollicité. Message poli expliquant qu'un historique
+     * de commandes payées est nécessaire.
+     */
+    private ResultatPipeline rejeterNouveauClient(Commande commande, String intention) {
+        eventStore.append(commande.getId(), "CREDIT_REFUSE_NOUVEAU_CLIENT",
+                Map.of("clientNom", commande.getClient().getNom(),
+                        "clientPhone", commande.getClient().getTelephone()),
+                null, "Nouveau client sans historique : crédit refusé automatiquement, "
+                        + "patron non sollicité");
+
+        commande.changerStatut(CommandeStatut.REJETEE);
+        commandeRepository.save(commande);
+
+        String message = genererMessageRefus(
+                "c'est une première commande et nous avons besoin d'un historique de "
+                        + "commandes payées avant d'accorder un crédit ; un paiement comptant "
+                        + "cette fois permet de bâtir la confiance");
+        envoyerMessageRefus(commande, message);
+        conversationService.fermer(commande.getClient().getTelephone(),
+                "Crédit refusé (nouveau client), sujet clos");
+
+        return new ResultatPipeline(commande.getId(), commande.getStatut().name(),
+                intention, DecisionType.REJECT.name(), null, message);
     }
 
     private ResultatPipeline appliquerVerdict(Commande commande,
@@ -362,6 +520,7 @@ public class CommandePipelineService {
                                               OrchestrationResult orchestration) {
         UUID cardId = orchestration.decisionCard() != null
                 ? orchestration.decisionCard().getId() : null;
+        String phone = commande.getClient().getTelephone();
 
         switch (orchestration.type()) {
             case AUTO -> {
@@ -372,18 +531,27 @@ public class CommandePipelineService {
                         commande.changerStatut(CommandeStatut.APPROUVEE);
                         commandeRepository.save(commande);
                         genererEtEnvoyerDevis(commande);
+                        conversationService.fermer(phone, "Commande auto-approuvée, devis envoyé");
                     }
                     case REJECT -> {
                         commande.changerStatut(CommandeStatut.REJETEE);
                         commandeRepository.save(commande);
+                        String message = genererMessageRefus(
+                                decision.reasoning() == null || decision.reasoning().isBlank()
+                                        ? "cette commande ne peut pas être validée pour le moment"
+                                        : decision.reasoning());
+                        envoyerMessageRefus(commande, message);
+                        conversationService.fermer(phone, "Commande refusée, sujet clos");
                     }
                     case CLARIFY_CLIENT -> {
                         commande.changerStatut(CommandeStatut.EN_CLARIFICATION);
                         commandeRepository.save(commande);
                         if (decision.proposition() != null && !decision.proposition().isBlank()) {
-                            notificationService.envoyer(commande.getId(),
-                                    commande.getClient().getTelephone(), decision.proposition());
+                            notificationService.envoyer(commande.getId(), phone, decision.proposition());
                         }
+                        conversationService.ouvrirPrecision(phone,
+                                "En attente de la réponse du client à : " + decision.proposition(),
+                                List.of(), commande.getId());
                     }
                     // Décision NEEDS_HUMAN malgré une confiance élevée :
                     // on respecte la demande du modèle et on route vers l'humain.
@@ -397,10 +565,77 @@ public class CommandePipelineService {
                 intention, decision.decision().name(), cardId, null);
     }
 
+    /**
+     * Transmet la commande au patron et prévient IMMÉDIATEMENT le client qu'il
+     * attend une réponse ; le contexte passe en attente de confirmation.
+     */
     private void mettreEnAttentePatron(Commande commande) {
         commande.changerStatut(CommandeStatut.VALIDEE_STOCK);
         commande.changerStatut(CommandeStatut.EN_ATTENTE_PATRON);
         commandeRepository.save(commande);
+
+        String phone = commande.getClient().getTelephone();
+        String message = "Bien reçu ! Je transmets votre demande au patron, "
+                + "je reviens vers vous très vite 🙏";
+        eventStore.append(commande.getId(), "MESSAGE_ATTENTE_ENVOYE",
+                Map.of("message", message, "clientPhone", phone), null, null);
+        notificationService.envoyer(commande.getId(), phone, message);
+        conversationService.passerEnAttenteConfirmation(phone,
+                "En attente de la décision du patron sur la commande " + commande.getId(),
+                commande.getId());
+    }
+
+    /**
+     * Reformule la réponse du patron en message naturel pour le client (jamais
+     * le texte brut du commentaire), l'envoie, et clôt/adapte le contexte.
+     * Appelé par le contrôleur de décision après enregistrement de l'action.
+     */
+    public void reformulerEtEnvoyerReponsePatron(Commande commande, String actionLabel, String commentaire) {
+        String phone = commande.getClient().getTelephone();
+        String message;
+        String reasoning = null;
+        try {
+            message = qwenClient.callFast(
+                    PROMPT_REFORMULATION.formatted(actionLabel,
+                            commentaire == null ? "" : commentaire)).trim();
+        } catch (Exception e) {
+            message = switch (actionLabel) {
+                case "APPROVE" -> "Bonne nouvelle ! Le patron a validé votre commande. "
+                        + "Je vous prépare le devis tout de suite.";
+                case "REJECT" -> "Merci de votre patience. Le patron ne peut pas donner suite "
+                        + "à cette commande cette fois, mais on reste à votre service !";
+                default -> "Le patron souhaite ajuster quelques détails, je reviens vers vous très vite.";
+            };
+            reasoning = "Fallback statique, échec de l'appel Qwen : " + e.getMessage();
+        }
+
+        eventStore.append(commande.getId(), "REPONSE_PATRON_REFORMULEE",
+                Map.of("message", message, "clientPhone", phone, "action", actionLabel), null, reasoning);
+        notificationService.envoyer(commande.getId(), phone, message);
+
+        if ("MODIFY".equals(actionLabel)) {
+            conversationService.passerEnAttenteConfirmation(phone,
+                    "Le patron ajuste la commande " + commande.getId(), commande.getId());
+        } else {
+            conversationService.fermer(phone, "Décision patron transmise au client");
+        }
+    }
+
+    private void envoyerMessageRefus(Commande commande, String message) {
+        eventStore.append(commande.getId(), "MESSAGE_REFUS_ENVOYE",
+                Map.of("message", message, "clientPhone", commande.getClient().getTelephone()),
+                null, null);
+        notificationService.envoyer(commande.getId(),
+                commande.getClient().getTelephone(), message);
+    }
+
+    private String genererMessageRefus(String motif) {
+        try {
+            return qwenClient.callFast(PROMPT_REFUS.formatted(motif)).trim();
+        } catch (Exception e) {
+            return "Désolé, nous ne pouvons pas valider cette commande pour le moment. "
+                    + "N'hésitez pas à revenir vers nous !";
+        }
     }
 
     /**
@@ -438,6 +673,53 @@ public class CommandePipelineService {
                 .filter(p -> p.getStock() > 0)
                 .map(p -> "- " + p.getNom() + " : " + p.getPrixUnitaire() + " FCFA")
                 .collect(Collectors.joining("\n"));
+    }
+
+    private static final List<String> INDICES_CREDIT = List.of(
+            "credit", "crédit", "paye", "payer", "paie", "acompte", "differe", "différé",
+            "plus tard", "lundi", "mois prochain", "apres", "après", "dette", "avance");
+
+    private boolean demandeCreditDetectee(String message) {
+        if (message == null || message.isBlank()) {
+            return false;
+        }
+        String m = message.toLowerCase(Locale.ROOT);
+        return INDICES_CREDIT.stream().anyMatch(m::contains);
+    }
+
+    /**
+     * Identifie le produit du catalogue évoqué par une question, s'il est
+     * unique. Retourne vide pour une question large ("quels sont vos
+     * produits ?") ou ambiguë, afin de n'ouvrir un contexte que lorsque le
+     * client vise clairement un produit précis.
+     */
+    private Optional<Produit> identifierProduitQuestion(String question) {
+        String q = normaliser(question);
+        List<Produit> matches = produitRepository.findAll().stream()
+                .filter(p -> p.getStock() > 0)
+                .filter(p -> motsSignificatifs(p.getNom()).stream().anyMatch(q::contains))
+                .toList();
+        return matches.size() == 1 ? Optional.of(matches.get(0)) : Optional.empty();
+    }
+
+    private List<String> motsSignificatifs(String nom) {
+        String base = nom;
+        int par = base.indexOf('(');
+        if (par >= 0) {
+            base = base.substring(0, par);
+        }
+        return Arrays.stream(normaliser(base).split("\\s+"))
+                .filter(w -> w.length() >= 4)
+                .filter(w -> w.chars().allMatch(Character::isLetter))
+                .filter(w -> !STOPWORDS.contains(w))
+                .toList();
+    }
+
+    private String normaliser(String texte) {
+        return Normalizer.normalize(texte, Normalizer.Form.NFD)
+                .replaceAll("\\p{M}", "")
+                .toLowerCase(Locale.ROOT)
+                .trim();
     }
 
     /**

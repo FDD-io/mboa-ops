@@ -8,6 +8,8 @@ import com.mboaops.backend.config.QwenProperties;
 import com.mboaops.backend.eventstore.EventStore;
 import org.springframework.stereotype.Service;
 
+import java.util.List;
+import java.util.Locale;
 import java.util.UUID;
 
 /**
@@ -24,6 +26,10 @@ public class BusinessRulesAgent {
             Tu reçois une commande extraite, la fiche du client et l'état du stock, au
             format JSON. Tu dois décider si la commande peut être traitée automatiquement.
 
+            Le champ "messageClient" est le texte brut du client. Détecte s'il
+            demande un CRÉDIT ou un PAIEMENT DIFFÉRÉ (ex. "je paye lundi", "je paye le
+            mois prochain", "faites-moi crédit", "je paye après", "à crédit").
+
             Règles impératives (dans cet ordre de priorité) :
             1. PRÉFÉRENCE PATRON (prioritaire sur la règle de crédit) : si le champ
                "preferencePatron" est renseigné, le patron a déjà approuvé au moins
@@ -32,19 +38,23 @@ public class BusinessRulesAgent {
                le stock est suffisant, choisis decision="AUTO_APPROVE" avec
                confidence >= 0.95 et mentionne la préférence apprise dans "reasoning".
                N'applique PAS la règle de crédit ci-dessous dans ce cas.
-            2. CRÉDIT : si le crédit impayé du client (creditEnCours) est supérieur à
-               30000 FCFA, REFUSE (decision="REJECT"), SAUF si le client a un historique
-               fiable (nombreCommandesHistorique > 10 ET nombreDefautsHistorique = 0) :
-               dans ce cas, decision="CLARIFY_CLIENT" et propose dans "proposition" un
-               acompte de 50% via Mobile Money.
-            3. STOCK (toujours vérifié, même avec une préférence patron) : si la
-               quantité demandée dépasse le stock disponible pour un produit, signale
-               le conflit dans "reasoning" et choisis decision="CLARIFY_CLIENT" (léger
-               dépassement, quantité ajustable) ou decision="NEEDS_HUMAN" (rupture
-               totale ou plusieurs conflits).
-            4. Si le crédit est acceptable et le stock suffisant pour toutes les lignes,
-               decision="AUTO_APPROVE".
-            5. En cas de donnée manquante ou de doute, decision="NEEDS_HUMAN".
+            2. CRÉDIT — CLIENT SANS HISTORIQUE (nombreCommandesHistorique == 0) : s'il
+               a un creditEnCours > 0 OU demande un crédit/paiement différé, alors
+               decision="REJECT". Motif clair dans "reasoning" : un historique de
+               commandes payées est nécessaire avant tout crédit. (Le patron ne sera
+               jamais sollicité pour un nouveau client.)
+            3. CRÉDIT — CLIENT AVEC HISTORIQUE (nombreCommandesHistorique >= 1) : si
+               creditEnCours > 30000 FCFA OU demande de crédit/paiement différé, alors
+               decision="CLARIFY_CLIENT" (le patron tranchera), QUEL QUE SOIT le
+               montant, et propose dans "proposition" un acompte via Mobile Money.
+            4. STOCK (toujours vérifié) : si la quantité demandée dépasse le stock
+               disponible pour un produit, signale le conflit dans "reasoning" et
+               choisis decision="CLARIFY_CLIENT" (léger dépassement, quantité
+               ajustable) ou decision="NEEDS_HUMAN" (rupture totale ou plusieurs
+               conflits).
+            5. Si aucun problème de crédit et le stock suffisant pour toutes les
+               lignes, decision="AUTO_APPROVE".
+            6. En cas de donnée manquante ou de doute, decision="NEEDS_HUMAN".
 
             Réponds UNIQUEMENT avec un JSON strict, sans texte autour ni balises markdown,
             au format exact :
@@ -105,13 +115,26 @@ public class BusinessRulesAgent {
      * défauts. Le cas nominal (crédit 0, stock large, aucun signal) est
      * tranché par le modèle rapide.
      */
+    private static final List<String> INDICES_CREDIT = List.of(
+            "credit", "crédit", "paye", "payer", "paie", "acompte", "differe", "différé",
+            "plus tard", "lundi", "mois prochain", "apres", "après", "dette", "avance");
+
     private boolean estCasComplexe(BusinessRulesInput input) {
         boolean stockInsuffisant = input.lignes().stream()
                 .anyMatch(l -> l.quantiteDemandee() > l.stockDisponible());
         return input.creditEnCours().signum() > 0
                 || input.preferencePatron() != null
                 || stockInsuffisant
-                || input.nombreDefautsHistorique() > 0;
+                || input.nombreDefautsHistorique() > 0
+                || demandeCreditProbable(input.messageClient());
+    }
+
+    private boolean demandeCreditProbable(String message) {
+        if (message == null || message.isBlank()) {
+            return false;
+        }
+        String m = message.toLowerCase(Locale.ROOT);
+        return INDICES_CREDIT.stream().anyMatch(m::contains);
     }
 
     private String buildPrompt(BusinessRulesInput input) {

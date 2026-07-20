@@ -45,6 +45,17 @@ function construireFil(commandes, events, telephone) {
         texte: e.payload?.reponse || '',
         heure: e.createdAt,
       });
+    } else if (
+      e.type === 'MESSAGE_ATTENTE_ENVOYE' ||
+      e.type === 'REPONSE_PATRON_REFORMULEE' ||
+      e.type === 'MESSAGE_REFUS_ENVOYE'
+    ) {
+      bulles.push({
+        id: e.id,
+        de: 'agent',
+        texte: e.payload?.message || '',
+        heure: e.createdAt,
+      });
     } else if (e.type === 'DEVIS_GENERE') {
       bulles.push({ id: e.id, de: 'agent', texte: e.payload?.devis || '', heure: e.createdAt });
     } else if (e.type === 'PAIEMENT_RECONCILIE') {

@@ -84,6 +84,9 @@ public class DecisionController {
                         "commentaire", commentaire),
                 null, commentaire.isBlank() ? null : commentaire);
 
+        // La réponse du patron (commentaire libre) n'est JAMAIS envoyée brute
+        // au client : l'agent la reformule toujours en message naturel.
+        String actionLabel = request.getAction().name();
         switch (request.getAction()) {
             case APPROVE -> {
                 card.setStatut(DecisionCardStatut.APPROUVEE);
@@ -91,6 +94,7 @@ public class DecisionController {
                 commande.changerStatut(CommandeStatut.APPROUVEE);
                 commandeRepository.save(commande);
                 memoryService.enregistrerApprobation(commande);
+                pipeline.reformulerEtEnvoyerReponsePatron(commande, actionLabel, commentaire);
                 pipeline.genererEtEnvoyerDevis(commande);
             }
             case REJECT -> {
@@ -98,12 +102,14 @@ public class DecisionController {
                 card.setActionAppliquee(DecisionCardAction.REJETER);
                 commande.changerStatut(CommandeStatut.REJETEE);
                 commandeRepository.save(commande);
+                pipeline.reformulerEtEnvoyerReponsePatron(commande, actionLabel, commentaire);
             }
             // MODIFY : le patron ajuste la commande hors ligne ; la commande
             // reste EN_ATTENTE_PATRON en attendant une nouvelle décision.
             case MODIFY -> {
                 card.setStatut(DecisionCardStatut.MODIFIEE);
                 card.setActionAppliquee(DecisionCardAction.MODIFIER);
+                pipeline.reformulerEtEnvoyerReponsePatron(commande, actionLabel, commentaire);
             }
         }
         decisionCardRepository.save(card);

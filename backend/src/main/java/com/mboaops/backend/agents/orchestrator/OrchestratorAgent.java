@@ -57,6 +57,15 @@ public class OrchestratorAgent {
     public OrchestrationResult orchestrer(Commande commande, BusinessDecision decision,
                                           boolean preferencePatronApplicable) {
         double confidence = appliquerDegradation(commande, decision);
+
+        // Un refus réduit l'exposition de l'entreprise : il est toujours sûr et
+        // ne passe jamais par le patron, même pour un client à crédit.
+        if (decision.decision() == com.mboaops.backend.agents.business.DecisionType.REJECT) {
+            eventStore.append(commande.getId(), "ORCHESTRATION_AUTO", decision, confidence,
+                    decision.reasoning());
+            return OrchestrationResult.auto(decision);
+        }
+
         boolean actionIrreversible = commande.getClient().getCreditEnCours().compareTo(BigDecimal.ZERO) > 0
                 && !preferencePatronApplicable;
 

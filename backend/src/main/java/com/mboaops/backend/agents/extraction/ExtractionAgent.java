@@ -42,6 +42,18 @@ public class ExtractionAgent {
             Message : "%s"
             """;
 
+    private static final String PROMPT_CONTEXTE = """
+            Conversation en cours avec un client de la quincaillerie MBOA-OPS.
+            Sujet déjà établi : %s.
+            Le client vient de répondre : "%s".
+            Déduis la commande COMPLÈTE en combinant le sujet établi et cette réponse.
+            Si le sujet est un produit et la réponse une quantité, associe-les.
+            JSON strict [{"produit": "...", "quantite": N, "confidence": 0.0-1.0}].
+            "produit" = nom générique du produit (ex. "fer à béton", "ciment"),
+            au singulier, sans quantité ni emballage.
+            Réponds UNIQUEMENT avec le tableau JSON, sans texte autour ni balises markdown.
+            """;
+
     private static final String CONTEXTE_ASR =
             "Transcris fidèlement ce message vocal en français camerounais. "
             + "Il peut contenir du camfranglais et des noms de produits de quincaillerie "
@@ -110,6 +122,29 @@ public class ExtractionAgent {
 
         eventStore.append(aggregateId, "EXTRACTION_TEXTE",
                 Map.of("lignes", lignes, "durationMs", dureeMs(debut)),
+                confidenceMoyenne(lignes), rawResponse);
+        return lignes;
+    }
+
+    /**
+     * Extraction guidée par le contexte conversationnel : le message de suivi
+     * ("5 barres") est combiné au sujet établi ("Fer à béton 12mm") pour
+     * reconstituer la commande complète, au lieu d'être extrait isolément.
+     */
+    public List<ExtractionLigne> extractAvecContexte(UUID aggregateId, String sujet, String message) {
+        long debut = System.nanoTime();
+        String rawResponse;
+        List<ExtractionLigne> lignes;
+        try {
+            rawResponse = qwenClient.callFast(PROMPT_CONTEXTE.formatted(sujet, message));
+            lignes = parseLignes(rawResponse);
+        } catch (Exception e) {
+            rawResponse = "Échec de l'appel Qwen : " + e.getMessage();
+            lignes = List.of();
+        }
+
+        eventStore.append(aggregateId, "EXTRACTION_CONTEXTUELLE",
+                Map.of("lignes", lignes, "sujet", sujet, "durationMs", dureeMs(debut)),
                 confidenceMoyenne(lignes), rawResponse);
         return lignes;
     }
