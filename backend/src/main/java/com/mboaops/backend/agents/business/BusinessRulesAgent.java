@@ -4,6 +4,7 @@ import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.mboaops.backend.agents.JsonExtractionUtil;
 import com.mboaops.backend.agents.qwen.QwenClient;
+import com.mboaops.backend.config.QwenProperties;
 import com.mboaops.backend.eventstore.EventStore;
 import org.springframework.stereotype.Service;
 
@@ -58,28 +59,59 @@ public class BusinessRulesAgent {
     private final QwenClient qwenClient;
     private final EventStore eventStore;
     private final ObjectMapper objectMapper;
+    private final QwenProperties qwenProperties;
 
-    public BusinessRulesAgent(QwenClient qwenClient, EventStore eventStore, ObjectMapper objectMapper) {
+    public BusinessRulesAgent(QwenClient qwenClient, EventStore eventStore,
+                              ObjectMapper objectMapper, QwenProperties qwenProperties) {
         this.qwenClient = qwenClient;
         this.eventStore = eventStore;
         this.objectMapper = objectMapper;
+        this.qwenProperties = qwenProperties;
     }
 
     public BusinessDecision evaluer(UUID commandeId, BusinessRulesInput input) {
         String prompt = buildPrompt(input);
+        boolean complexe = estCasComplexe(input);
+        String modele = complexe ? qwenProperties.getModelReasoning() : qwenProperties.getModelFast();
 
+        long debut = System.nanoTime();
         String rawResponse;
         BusinessDecision decision;
         try {
-            rawResponse = qwenClient.callReasoning(prompt);
+            rawResponse = complexe ? qwenClient.callReasoning(prompt) : qwenClient.callFast(prompt);
             decision = parse(rawResponse);
         } catch (Exception e) {
             rawResponse = "Échec de l'appel Qwen : " + e.getMessage();
             decision = fallback(rawResponse);
         }
+        long durationMs = (System.nanoTime() - debut) / 1_000_000;
 
-        eventStore.append(commandeId, "BUSINESS_RULES_DECISION", decision, decision.confidence(), rawResponse);
+        eventStore.append(commandeId, "BUSINESS_RULES_DECISION",
+                java.util.Map.of(
+                        "decision", decision.decision(),
+                        "confidence", decision.confidence(),
+                        "reasoning", decision.reasoning() == null ? "" : decision.reasoning(),
+                        "proposition", decision.proposition() == null ? "" : decision.proposition(),
+                        "modele", modele,
+                        "durationMs", durationMs),
+                decision.confidence(), rawResponse);
         return decision;
+    }
+
+    /**
+     * Le modèle de raisonnement n'est sollicité que quand plusieurs règles
+     * peuvent entrer en tension : crédit en cours, préférence patron à
+     * arbitrer, stock insuffisant sur au moins une ligne, ou historique de
+     * défauts. Le cas nominal (crédit 0, stock large, aucun signal) est
+     * tranché par le modèle rapide.
+     */
+    private boolean estCasComplexe(BusinessRulesInput input) {
+        boolean stockInsuffisant = input.lignes().stream()
+                .anyMatch(l -> l.quantiteDemandee() > l.stockDisponible());
+        return input.creditEnCours().signum() > 0
+                || input.preferencePatron() != null
+                || stockInsuffisant
+                || input.nombreDefautsHistorique() > 0;
     }
 
     private String buildPrompt(BusinessRulesInput input) {

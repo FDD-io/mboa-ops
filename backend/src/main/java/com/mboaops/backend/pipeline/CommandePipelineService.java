@@ -34,6 +34,7 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
 import java.util.stream.Collectors;
 
 /**
@@ -156,10 +157,18 @@ public class CommandePipelineService {
                                                      String audioFormat,
                                                      String imageBase64,
                                                      String imageMimeType) {
-        String transcript = null;
-        if (audioBase64 != null) {
-            transcript = extractionAgent.transcribeAudio(messageId, audioBase64, audioFormat);
-        }
+        // Transcription (ASR) et lecture de l'image (VL) sont indépendantes :
+        // elles partent en parallèle, leurs événements sur l'agrégat du message.
+        CompletableFuture<String> futurTranscript = audioBase64 != null
+                ? CompletableFuture.supplyAsync(
+                        () -> extractionAgent.transcribeAudio(messageId, audioBase64, audioFormat))
+                : CompletableFuture.completedFuture(null);
+        CompletableFuture<List<ExtractionLigne>> futurImage = imageBase64 != null
+                ? CompletableFuture.supplyAsync(
+                        () -> extractionAgent.extractFromImage(messageId, imageBase64, imageMimeType))
+                : CompletableFuture.completedFuture(List.of());
+
+        String transcript = futurTranscript.join();
 
         // Le routeur classifie le texte disponible (message écrit ou
         // transcription du vocal). Une photo seule est traitée comme une
@@ -185,10 +194,7 @@ public class CommandePipelineService {
         if (transcript != null && !transcript.isBlank()) {
             depuisAudio = extractionAgent.extractFromTexte(commande.getId(), transcript);
         }
-        List<ExtractionLigne> depuisImage = List.of();
-        if (imageBase64 != null) {
-            depuisImage = extractionAgent.extractFromImage(commande.getId(), imageBase64, imageMimeType);
-        }
+        List<ExtractionLigne> depuisImage = futurImage.join();
 
         return pipelineCommande(commande, intention, depuisAudio, depuisImage);
     }
@@ -198,6 +204,7 @@ public class CommandePipelineService {
      * le catalogue en stock, sans jamais créer de commande.
      */
     private String repondreQuestion(UUID messageId, Client client, String question) {
+        long debut = System.nanoTime();
         String reponse;
         String reasoning = null;
         try {
@@ -210,11 +217,13 @@ public class CommandePipelineService {
                     + "ou dites-moi ce que vous cherchez !";
             reasoning = "Fallback statique, échec de l'appel Qwen : " + e.getMessage();
         }
+        long durationMs = (System.nanoTime() - debut) / 1_000_000;
 
         eventStore.append(messageId, "REPONSE_QUESTION_ENVOYEE",
                 Map.of("clientPhone", client.getTelephone(),
                         "question", question,
-                        "reponse", reponse),
+                        "reponse", reponse,
+                        "durationMs", durationMs),
                 null, reasoning);
         notificationService.envoyer(messageId, client.getTelephone(), reponse);
         return reponse;
@@ -323,6 +332,7 @@ public class CommandePipelineService {
                         + "côté avec ces quantités exactes : "
                         + String.join(", ", connuesNoms) + ".";
 
+        long debut = System.nanoTime();
         String message;
         String reasoning = null;
         try {
@@ -335,8 +345,10 @@ public class CommandePipelineService {
                     + ". Jetez un œil à notre catalogue et dites-moi ce qu'il vous faut !";
             reasoning = "Fallback statique, échec de l'appel Qwen : " + e.getMessage();
         }
+        long durationMs = (System.nanoTime() - debut) / 1_000_000;
 
-        eventStore.append(commande.getId(), "MESSAGE_CLARIFICATION_GENERE", message, null, reasoning);
+        eventStore.append(commande.getId(), "MESSAGE_CLARIFICATION_GENERE",
+                Map.of("message", message, "durationMs", durationMs), null, reasoning);
         notificationService.envoyer(commande.getId(),
                 commande.getClient().getTelephone(), message);
 

@@ -8,6 +8,7 @@ import com.mboaops.backend.eventstore.EventStore;
 import org.springframework.stereotype.Service;
 
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
 
 /**
@@ -57,6 +58,7 @@ public class ExtractionAgent {
     }
 
     public List<ExtractionLigne> extractFromImage(UUID aggregateId, String base64Image, String mimeType) {
+        long debut = System.nanoTime();
         String rawResponse;
         List<ExtractionLigne> lignes;
         try {
@@ -67,11 +69,14 @@ public class ExtractionAgent {
             lignes = List.of();
         }
 
-        eventStore.append(aggregateId, "EXTRACTION_IMAGE", lignes, confidenceMoyenne(lignes), rawResponse);
+        eventStore.append(aggregateId, "EXTRACTION_IMAGE",
+                Map.of("lignes", lignes, "durationMs", dureeMs(debut)),
+                confidenceMoyenne(lignes), rawResponse);
         return lignes;
     }
 
     public String transcribeAudio(UUID aggregateId, String base64Audio, String format) {
+        long debut = System.nanoTime();
         String transcript;
         Double confidence = null;
         try {
@@ -80,16 +85,19 @@ public class ExtractionAgent {
         } catch (Exception e) {
             transcript = "";
             confidence = 0.0;
-            eventStore.append(aggregateId, "TRANSCRIPTION_AUDIO", "", confidence,
+            eventStore.append(aggregateId, "TRANSCRIPTION_AUDIO",
+                    Map.of("transcript", "", "durationMs", dureeMs(debut)), confidence,
                     "Échec de l'appel Qwen ASR : " + e.getMessage());
             return transcript;
         }
 
-        eventStore.append(aggregateId, "TRANSCRIPTION_AUDIO", transcript, confidence, null);
+        eventStore.append(aggregateId, "TRANSCRIPTION_AUDIO",
+                Map.of("transcript", transcript, "durationMs", dureeMs(debut)), confidence, null);
         return transcript;
     }
 
     public List<ExtractionLigne> extractFromTexte(UUID aggregateId, String texte) {
+        long debut = System.nanoTime();
         String rawResponse;
         List<ExtractionLigne> lignes;
         try {
@@ -100,8 +108,14 @@ public class ExtractionAgent {
             lignes = List.of();
         }
 
-        eventStore.append(aggregateId, "EXTRACTION_TEXTE", lignes, confidenceMoyenne(lignes), rawResponse);
+        eventStore.append(aggregateId, "EXTRACTION_TEXTE",
+                Map.of("lignes", lignes, "durationMs", dureeMs(debut)),
+                confidenceMoyenne(lignes), rawResponse);
         return lignes;
+    }
+
+    private long dureeMs(long debutNanos) {
+        return (System.nanoTime() - debutNanos) / 1_000_000;
     }
 
     private List<ExtractionLigne> parseLignes(String raw) {

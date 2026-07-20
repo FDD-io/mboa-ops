@@ -34,7 +34,10 @@ function construireFil(commandes, events, telephone) {
         heure: e.createdAt,
       });
     } else if (e.type === 'MESSAGE_CLARIFICATION_GENERE') {
-      bulles.push({ id: e.id, de: 'agent', texte: String(e.payload), heure: e.createdAt });
+      // payload : chaîne (historique) ou {message, durationMs} (instrumenté)
+      const texte =
+        typeof e.payload === 'string' ? e.payload : e.payload?.message || '';
+      bulles.push({ id: e.id, de: 'agent', texte, heure: e.createdAt });
     } else if (e.type === 'REPONSE_QUESTION_ENVOYEE') {
       bulles.push({
         id: e.id,

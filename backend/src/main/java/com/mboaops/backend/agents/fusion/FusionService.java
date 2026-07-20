@@ -98,6 +98,7 @@ public class FusionService {
                     .append(". ");
         }
 
+        long debut = System.nanoTime();
         String message;
         String reasoning = null;
         try {
@@ -109,8 +110,10 @@ public class FusionService {
                     + " pour " + premier.produit() + " — c'est combien finalement ?";
             reasoning = "Fallback statique, échec de l'appel Qwen : " + e.getMessage();
         }
+        long durationMs = (System.nanoTime() - debut) / 1_000_000;
 
-        eventStore.append(commande.getId(), "MESSAGE_CLARIFICATION_GENERE", message, null, reasoning);
+        eventStore.append(commande.getId(), "MESSAGE_CLARIFICATION_GENERE",
+                Map.of("message", message, "durationMs", durationMs), null, reasoning);
         return message;
     }
 

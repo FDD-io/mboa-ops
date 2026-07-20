@@ -61,6 +61,7 @@ public class RouterAgent {
     public RouterDecision classifier(UUID aggregateId, String message) {
         String prompt = SYSTEM_PROMPT + "\n\nMessage : \"" + message + "\"\nRéponse :";
 
+        long debut = System.nanoTime();
         String rawResponse;
         RouterDecision decision;
         try {
@@ -70,8 +71,16 @@ public class RouterAgent {
             rawResponse = "Échec de l'appel Qwen : " + e.getMessage();
             decision = FALLBACK;
         }
+        long durationMs = (System.nanoTime() - debut) / 1_000_000;
 
-        eventStore.append(aggregateId, "ROUTER_CLASSIFICATION", decision, decision.confidence(), rawResponse);
+        eventStore.append(aggregateId, "ROUTER_CLASSIFICATION",
+                java.util.Map.of(
+                        "intention", decision.intention(),
+                        "urgence", decision.urgence(),
+                        "langue", decision.langue(),
+                        "confidence", decision.confidence(),
+                        "durationMs", durationMs),
+                decision.confidence(), rawResponse);
         return decision;
     }
 

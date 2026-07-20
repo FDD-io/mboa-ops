@@ -44,12 +44,12 @@ public class QwenClient {
 
     public String callFast(String prompt) {
         return call(qwenProperties.getModelFast(),
-                List.of(new QwenChatMessage("user", prompt)));
+                List.of(new QwenChatMessage("user", prompt)), TIMEOUT, false);
     }
 
     public String callReasoning(String prompt) {
         return call(qwenProperties.getModelReasoning(),
-                List.of(new QwenChatMessage("user", prompt)), TIMEOUT_REASONING);
+                List.of(new QwenChatMessage("user", prompt)), TIMEOUT_REASONING, false);
     }
 
     /**
@@ -83,20 +83,23 @@ public class QwenClient {
     }
 
     private String call(String model, List<QwenChatMessage> messages) {
-        return call(model, messages, TIMEOUT);
+        // Modèles vision/ASR : enable_thinking omis (paramètre inconnu chez eux).
+        return call(model, messages, TIMEOUT, null);
     }
 
-    private String call(String model, List<QwenChatMessage> messages, Duration timeout) {
+    private String call(String model, List<QwenChatMessage> messages, Duration timeout,
+                        Boolean enableThinking) {
         try {
-            return circuitBreaker.executeSupplier(() -> doCall(model, messages, timeout));
+            return circuitBreaker.executeSupplier(() -> doCall(model, messages, timeout, enableThinking));
         } catch (CallNotPermittedException e) {
             throw new QwenClientException(
                     "Circuit 'qwen' ouvert : appels LLM suspendus (modèle '" + model + "')", e);
         }
     }
 
-    private String doCall(String model, List<QwenChatMessage> messages, Duration timeout) {
-        QwenChatRequest request = new QwenChatRequest(model, messages, 0.1);
+    private String doCall(String model, List<QwenChatMessage> messages, Duration timeout,
+                          Boolean enableThinking) {
+        QwenChatRequest request = new QwenChatRequest(model, messages, 0.1, enableThinking);
 
         QwenChatResponse response;
         try {
