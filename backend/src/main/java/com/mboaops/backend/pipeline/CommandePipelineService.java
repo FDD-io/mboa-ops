@@ -252,8 +252,11 @@ public class CommandePipelineService {
                             "message", texte),
                     null, "Message interprété comme réponse au sujet en cours");
 
-            Commande commande = commandeRepository.save(
-                    new Commande(client, CommandeStatut.RECUE, BigDecimal.ZERO));
+            // Si le contexte référence déjà une commande (conflit, produit
+            // inconnu, proposition d'acompte), on la RÉUTILISE : la résolution
+            // reste sur la même commande. Sinon (suite d'une simple question),
+            // on en crée une.
+            Commande commande = reutiliserOuCreerCommande(client, contexte.getCommandeId());
             List<ExtractionLigne> lignes = extractionAgent.extractAvecContexte(
                     commande.getId(), contexte.getSujet(), texte);
             if (lignes.isEmpty()) {
@@ -271,6 +274,62 @@ public class CommandePipelineService {
         }
 
         return null;
+    }
+
+    /**
+     * Réutilise la commande référencée par le contexte (résolution sur la même
+     * commande, sans doublon), en réinitialisant ses lignes pour qu'elles
+     * soient reconstruites à partir de la réponse du client. À défaut, en crée
+     * une nouvelle.
+     */
+    private Commande reutiliserOuCreerCommande(Client client, UUID commandeId) {
+        if (commandeId != null) {
+            // Chargement avec lignes initialisées : le pipeline est hors
+            // transaction, un accès LAZY échouerait.
+            Optional<Commande> existante = commandeRepository.findByIdWithLignes(commandeId);
+            if (existante.isPresent()) {
+                Commande commande = existante.get();
+                commande.getLignes().clear();
+                commande.setMontantTotal(BigDecimal.ZERO);
+                return commandeRepository.save(commande);
+            }
+        }
+        return commandeRepository.save(new Commande(client, CommandeStatut.RECUE, BigDecimal.ZERO));
+    }
+
+    /** Sujet riche décrivant la commande en conflit : produits confirmés +
+     *  ligne(s) à clarifier, pour que la réponse du client reconstruise toute
+     *  la commande. */
+    private String construireSujetConflit(FusionResult fusion) {
+        Set<String> enConflit = fusion.conflits().stream()
+                .map(c -> normaliser(c.produit()))
+                .collect(Collectors.toSet());
+        String confirmes = fusion.lignes().stream()
+                .filter(l -> !enConflit.contains(normaliser(l.produit())))
+                .map(l -> l.quantite() + " x " + l.produit())
+                .collect(Collectors.joining(", "));
+        String aClarifier = fusion.conflits().stream()
+                .map(c -> c.produit() + " (quantité à confirmer : vocale=" + c.quantiteAudio()
+                        + ", liste=" + c.quantiteImage() + ")")
+                .collect(Collectors.joining(", "));
+        StringBuilder sujet = new StringBuilder("Commande en cours. ");
+        if (!confirmes.isBlank()) {
+            sujet.append("Produits confirmés à garder : ").append(confirmes).append(". ");
+        }
+        sujet.append("À clarifier : ").append(aClarifier)
+                .append(". Le client doit préciser la quantité en conflit ; "
+                        + "conserve les produits confirmés.");
+        return sujet.toString();
+    }
+
+    private List<String> lignesConfirmees(FusionResult fusion) {
+        Set<String> enConflit = fusion.conflits().stream()
+                .map(c -> normaliser(c.produit()))
+                .collect(Collectors.toSet());
+        return fusion.lignes().stream()
+                .filter(l -> !enConflit.contains(normaliser(l.produit())))
+                .map(l -> l.quantite() + " x " + l.produit())
+                .toList();
     }
 
     private ResultatPipeline routerEtTraiter(Client client, UUID messageId, String texte) {
@@ -354,9 +413,12 @@ public class CommandePipelineService {
         if (fusion.aDesConflits()) {
             notificationService.envoyer(commande.getId(),
                     commande.getClient().getTelephone(), fusion.messageClarification());
+            // Le contexte porte la commande complète (produits confirmés +
+            // ligne(s) en conflit) et l'id de la commande, pour que la réponse
+            // du client reconstruise toute la commande sur la MÊME commande,
+            // sans perdre les produits non conflictuels ni créer de doublon.
             conversationService.ouvrirPrecision(commande.getClient().getTelephone(),
-                    "Conflit de quantité à clarifier : " + fusion.messageClarification(),
-                    List.of(), commande.getId());
+                    construireSujetConflit(fusion), lignesConfirmees(fusion), commande.getId());
             return new ResultatPipeline(commande.getId(), commande.getStatut().name(),
                     intention, null, null, fusion.messageClarification());
         }

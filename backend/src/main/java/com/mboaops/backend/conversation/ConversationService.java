@@ -3,6 +3,7 @@ package com.mboaops.backend.conversation;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.mboaops.backend.eventstore.EventStore;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
 import java.nio.charset.StandardCharsets;
@@ -18,23 +19,27 @@ import java.util.UUID;
  * Gère l'état conversationnel par client. Chaque changement est journalisé
  * (CONTEXTE_CONVERSATION_MISE_A_JOUR) sur un flux d'événements propre au
  * client, pour tracer l'ouverture, la mise à jour et la fermeture du sujet.
- * Un sujet inactif depuis plus de 15 minutes est considéré abandonné.
+ * Un sujet inactif au-delà du délai configuré (15 min par défaut) est
+ * considéré abandonné. Le délai est réglable via
+ * {@code mboa-ops.conversation.timeout-seconds} (utile pour le tester
+ * rapidement sans attendre 15 minutes).
  */
 @Service
 public class ConversationService {
 
-    private static final Duration TIMEOUT = Duration.ofMinutes(15);
-
     private final ConversationContextRepository repository;
     private final EventStore eventStore;
     private final ObjectMapper objectMapper;
+    private final Duration timeout;
 
     public ConversationService(ConversationContextRepository repository,
                                EventStore eventStore,
-                               ObjectMapper objectMapper) {
+                               ObjectMapper objectMapper,
+                               @Value("${mboa-ops.conversation.timeout-seconds:900}") long timeoutSeconds) {
         this.repository = repository;
         this.eventStore = eventStore;
         this.objectMapper = objectMapper;
+        this.timeout = Duration.ofSeconds(timeoutSeconds);
     }
 
     /**
@@ -50,11 +55,12 @@ public class ConversationService {
         if (ctx.getStatut() == ConversationStatut.AUCUNE) {
             return Optional.empty();
         }
-        if (ctx.getDerniereMaj().isBefore(Instant.now().minus(TIMEOUT))) {
+        if (ctx.getDerniereMaj().isBefore(Instant.now().minus(timeout))) {
             ctx.setStatut(ConversationStatut.AUCUNE);
             ctx.setDerniereMaj(Instant.now());
             repository.save(ctx);
-            journaliser(ctx, "Sujet abandonné après 15 min d'inactivité");
+            journaliser(ctx, "Sujet abandonné après " + timeout.toSeconds()
+                    + "s d'inactivité (délai configuré)");
             return Optional.empty();
         }
         return Optional.of(ctx);
