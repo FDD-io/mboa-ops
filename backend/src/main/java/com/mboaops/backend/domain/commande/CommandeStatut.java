@@ -13,6 +13,10 @@ public enum CommandeStatut {
     EN_ATTENTE_PATRON,
     APPROUVEE,
     DEVIS_ENVOYE,
+    // Crédit accordé par le patron sans conditions de paiement précisées :
+    // la commande est réservée, aucun devis avec lien de paiement immédiat
+    // n'est envoyé ; le règlement s'arrange directement avec le patron.
+    CREDIT_ACCORDE,
     PAYEE,
     LIVREE,
     REJETEE;
@@ -24,8 +28,9 @@ public enum CommandeStatut {
             case EN_CLARIFICATION -> cible == EXTRAITE || cible == VALIDEE_STOCK || cible == REJETEE;
             case VALIDEE_STOCK -> cible == EN_ATTENTE_PATRON || cible == REJETEE;
             case EN_ATTENTE_PATRON -> cible == APPROUVEE || cible == REJETEE;
-            case APPROUVEE -> cible == DEVIS_ENVOYE || cible == REJETEE;
+            case APPROUVEE -> cible == DEVIS_ENVOYE || cible == CREDIT_ACCORDE || cible == REJETEE;
             case DEVIS_ENVOYE -> cible == PAYEE || cible == REJETEE;
+            case CREDIT_ACCORDE -> cible == PAYEE || cible == REJETEE;
             case PAYEE -> cible == LIVREE;
             case LIVREE, REJETEE -> false;
         };

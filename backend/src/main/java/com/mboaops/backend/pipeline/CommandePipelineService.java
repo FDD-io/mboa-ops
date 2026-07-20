@@ -112,15 +112,16 @@ public class CommandePipelineService {
             sans guillemets ni markdown.
             """;
 
-    // Cas où le client a EXPLICITEMENT demandé un crédit/délai : langage
-    // orienté "demande transmise / accordée".
+    // Cas où le client a EXPLICITEMENT demandé un crédit/délai ET le patron a
+    // précisé des conditions de paiement : langage "demande accordée" + devis.
     private static final String PROMPT_REFORMULATION_CREDIT = """
             Tu es le vendeur WhatsApp de MBOA-OPS. Le patron a répondu à la DEMANDE
             de crédit/délai d'un client (action=%s, commentaire du patron="%s").
             Reformule cette décision en UN SEUL message WhatsApp chaleureux et naturel
             POUR LE CLIENT, à la première personne du vendeur, maximum 3 phrases.
+            VOUVOIEMENT OBLIGATOIRE (vous/votre), jamais de tutoiement.
             Ne cite JAMAIS le patron mot pour mot, n'emploie aucun terme interne.
-            Si une condition (acompte, pourcentage) est mentionnée, explique-la
+            Si une condition (acompte, pourcentage, délai) est mentionnée, explique-la
             simplement. Réponds uniquement avec le message, sans guillemets ni markdown.
             """;
 
@@ -134,11 +135,27 @@ public class CommandePipelineService {
             IMPORTANT : le client n'a RIEN demandé de spécial, c'est une simple
             commande. N'emploie JAMAIS les mots "demande" ni "approuvée" : parle de
             "commande" et de "validation".
+            VOUVOIEMENT OBLIGATOIRE (vous/votre), jamais de tutoiement.
             Reformule en UN SEUL message WhatsApp chaleureux et naturel POUR LE CLIENT,
             à la première personne du vendeur, maximum 3 phrases. Ne cite jamais l'interne.
             - action=APPROVE : annonce que la COMMANDE est VALIDÉE et que tu envoies le devis.
             - action=REJECT : annonce poliment que la commande ne peut pas être traitée cette fois.
             - action=MODIFY : annonce qu'un ajustement de la commande est en cours.
+            Réponds uniquement avec le message, sans guillemets ni markdown.
+            """;
+
+    // Crédit accordé par le patron SANS conditions de paiement précisées :
+    // commande réservée, règlement à arranger avec le patron, AUCUN montant ni
+    // lien de paiement affiché.
+    private static final String PROMPT_CREDIT_RESERVE = """
+            Tu es le vendeur WhatsApp de MBOA-OPS. Le patron a ACCORDÉ le crédit
+            demandé par le client, SANS préciser de conditions de paiement.
+            Rédige UN SEUL message WhatsApp chaleureux POUR LE CLIENT, maximum 3 phrases.
+            VOUVOIEMENT OBLIGATOIRE (vous/votre), jamais de tutoiement.
+            - Confirme que le crédit est accordé et que la commande est réservée / en
+              préparation.
+            - Précise que le règlement se fera directement avec le patron.
+            - N'affiche AUCUN montant ni lien de paiement.
             Réponds uniquement avec le message, sans guillemets ni markdown.
             """;
 
@@ -671,6 +688,68 @@ public class CommandePipelineService {
         conversationService.passerEnAttenteConfirmation(phone,
                 "En attente de la décision du patron sur la commande " + commande.getId(),
                 commande.getId());
+    }
+
+    /**
+     * Applique l'approbation du patron. Pour une demande de crédit accordée
+     * SANS conditions de paiement précisées : commande réservée (statut
+     * CREDIT_ACCORDE), message de confirmation sans montant ni lien MoMo, le
+     * règlement s'arrange avec le patron. Sinon (crédit avec conditions, ou
+     * commande normale) : message naturel + devis habituel avec lien.
+     */
+    public void appliquerApprobationPatron(Commande commande, String commentaire, boolean demandeCredit) {
+        String phone = commande.getClient().getTelephone();
+        boolean conditionsPrecisees = conditionsPaiementPrecisees(commentaire);
+
+        if (demandeCredit && !conditionsPrecisees) {
+            String message;
+            String reasoning = null;
+            try {
+                message = qwenClient.callFast(PROMPT_CREDIT_RESERVE).trim();
+            } catch (Exception e) {
+                message = "C'est noté, votre crédit est accordé et votre commande est "
+                        + "réservée. Le règlement se fera directement avec le patron ; "
+                        + "je vous tiens au courant pour la préparation.";
+                reasoning = "Fallback statique, échec de l'appel Qwen : " + e.getMessage();
+            }
+            eventStore.append(commande.getId(), "REPONSE_PATRON_REFORMULEE",
+                    Map.of("message", message, "clientPhone", phone,
+                            "action", "APPROVE", "demandeCredit", true, "creditSansConditions", true),
+                    null, reasoning);
+            notificationService.envoyer(commande.getId(), phone, message);
+
+            // Trace comptable (montant + lignes), mais aucun lien de paiement.
+            eventStore.append(commande.getId(), "COMMANDE_RESERVEE_CREDIT",
+                    Map.of("montantTotal", commande.getMontantTotal()), null,
+                    "Crédit accordé sans conditions : commande réservée, règlement à "
+                            + "arranger avec le patron, pas de devis avec lien de paiement immédiat");
+            commande.changerStatut(CommandeStatut.CREDIT_ACCORDE);
+            commandeRepository.save(commande);
+            conversationService.fermer(phone, "Crédit accordé, commande réservée");
+            return;
+        }
+
+        reformulerEtEnvoyerReponsePatron(commande, "APPROVE", commentaire, demandeCredit);
+        genererEtEnvoyerDevis(commande);
+    }
+
+    private static final List<String> INDICES_CONDITIONS = List.of(
+            "acompte", "%", "pourcent", "jour", "mois", "semaine", "echeance", "échéance",
+            "moitie", "moitié", "avance", "comptant", "immediat", "immédiat", "cash",
+            "espece", "espèce", "tranche", "versement", "delai", "délai");
+
+    /** Le commentaire du patron précise-t-il des conditions de paiement
+     *  identifiables (acompte, pourcentage, délai...) ? Un commentaire vide
+     *  ou vague ("ok") n'en précise aucune. */
+    private boolean conditionsPaiementPrecisees(String commentaire) {
+        if (commentaire == null || commentaire.isBlank()) {
+            return false;
+        }
+        String c = commentaire.toLowerCase(Locale.ROOT);
+        if (c.matches(".*\\d+\\s*%.*")) {
+            return true;
+        }
+        return INDICES_CONDITIONS.stream().anyMatch(c::contains);
     }
 
     /**

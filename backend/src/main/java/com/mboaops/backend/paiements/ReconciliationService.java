@@ -54,7 +54,11 @@ public class ReconciliationService {
             return ReconciliationResult.echec(parse, "SMS inexploitable");
         }
 
-        List<Commande> enAttente = commandeRepository.findByStatut(CommandeStatut.DEVIS_ENVOYE);
+        // Un paiement peut solder un devis envoyé OU une commande à crédit
+        // accordé (le client à crédit finit par régler, éventuellement par MoMo).
+        List<Commande> enAttente = new java.util.ArrayList<>(
+                commandeRepository.findByStatut(CommandeStatut.DEVIS_ENVOYE));
+        enAttente.addAll(commandeRepository.findByStatut(CommandeStatut.CREDIT_ACCORDE));
         for (Commande commande : enAttente) {
             if (!clientCorrespond(parse.expediteur(), commande.getClient().getNom())) {
                 continue;

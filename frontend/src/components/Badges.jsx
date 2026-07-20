@@ -6,6 +6,7 @@ const STATUT_STYLES = {
   EN_ATTENTE_PATRON: 'bg-violet-100 text-violet-800',
   APPROUVEE: 'bg-emerald-100 text-emerald-800',
   DEVIS_ENVOYE: 'bg-teal-100 text-teal-800',
+  CREDIT_ACCORDE: 'bg-indigo-100 text-indigo-800',
   PAYEE: 'bg-emerald-600 text-white',
   LIVREE: 'bg-emerald-800 text-white',
   REJETEE: 'bg-red-100 text-red-800',

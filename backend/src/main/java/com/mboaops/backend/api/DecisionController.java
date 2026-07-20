@@ -94,9 +94,9 @@ public class DecisionController {
                 commande.changerStatut(CommandeStatut.APPROUVEE);
                 commandeRepository.save(commande);
                 memoryService.enregistrerApprobation(commande);
-                pipeline.reformulerEtEnvoyerReponsePatron(commande, actionLabel, commentaire,
-                        card.isDemandeCredit());
-                pipeline.genererEtEnvoyerDevis(commande);
+                // Choisit le devis-avec-lien ou la commande réservée à crédit
+                // selon que le patron a précisé des conditions de paiement.
+                pipeline.appliquerApprobationPatron(commande, commentaire, card.isDemandeCredit());
             }
             case REJECT -> {
                 card.setStatut(DecisionCardStatut.REJETEE);
