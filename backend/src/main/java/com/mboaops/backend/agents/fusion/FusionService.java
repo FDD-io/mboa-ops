@@ -28,8 +28,9 @@ public class FusionService {
     private static final String PROMPT_CLARIFICATION = """
             Tu es l'assistant d'une quincaillerie camerounaise. Un client a envoyé un
             vocal ET une liste écrite, mais les quantités ne correspondent pas.
-            Rédige UN SEUL court message WhatsApp (2 phrases max) pour lui demander
-            poliment la bonne quantité, sur un ton chaleureux camerounais.
+            CONTRAINTES STRICTES : UN SEUL message WhatsApp, maximum 2 phrases
+            courtes, ton chaleureux camerounais, jamais de pavé. Reprends les
+            quantités EXACTES du conflit.
             Exemple de ton : "Maman, sur la vocale j'entends 3 cartons mais sur la
             liste je vois 5 — c'est combien finalement ?"
             Réponds uniquement avec le message, sans guillemets ni explication.

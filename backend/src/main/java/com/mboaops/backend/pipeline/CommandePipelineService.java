@@ -54,9 +54,17 @@ public class CommandePipelineService {
     private static final String PROMPT_QUESTION = """
             Tu es le vendeur WhatsApp de MBOA-OPS, une quincaillerie camerounaise.
             Ton chaleureux de commerçant camerounais (maman, papa, mon frère...).
-            Réponds à la question du client en t'appuyant UNIQUEMENT sur le
-            catalogue des produits disponibles ci-dessous (nom et prix en FCFA).
-            Réponds en 2 à 4 phrases maximum, style message WhatsApp, sans markdown.
+
+            CONTRAINTES STRICTES (style WhatsApp, jamais de pavé) :
+            - Maximum 3 phrases courtes OU 6 lignes au total.
+            - Ne JAMAIS lister tout le catalogue : cite au maximum 4-5 produits
+              phares, en liste courte du type "- Ciment CIMENCAM : 6500 F/sac".
+            - Si le client demande une catégorie précise (ex. la peinture),
+              réponds UNIQUEMENT sur cette catégorie, rien d'autre.
+            - Termine par une courte question d'engagement
+              (ex. "Vous cherchez quoi exactement ?").
+            Appuie-toi UNIQUEMENT sur le catalogue disponible ci-dessous.
+            Réponds uniquement avec le message, sans markdown.
 
             Catalogue disponible :
             %s
@@ -68,12 +76,15 @@ public class CommandePipelineService {
             Tu es le vendeur WhatsApp de MBOA-OPS, une quincaillerie camerounaise.
             Un client demande des produits que nous ne vendons PAS : %s.
             %s
-            Rédige UN SEUL court message WhatsApp (2-3 phrases max), ton chaleureux
-            camerounais ("Désolé maman/papa..."), qui :
-            - explique qu'on ne vend pas ce(s) produit(s) ;
-            - propose 2 ou 3 produits proches du catalogue ci-dessous SI pertinent,
-              sinon invite à consulter le catalogue ;
-            - si des produits connus sont gardés de côté, le dit clairement.
+
+            CONTRAINTES STRICTES (style WhatsApp, jamais de pavé) :
+            - UN SEUL message, maximum 3 phrases courtes, ton chaleureux
+              camerounais ("Désolé maman/papa...").
+            - Dis qu'on ne vend pas ce(s) produit(s).
+            - Si des produits connus sont gardés de côté, cite-les avec leurs
+              QUANTITÉS EXACTES (ex. "vos 2 sacs de ciment sont mis de côté").
+            - Propose au plus 2 produits proches du catalogue SI pertinent,
+              sinon invite simplement à voir le catalogue.
             Réponds uniquement avec le message, sans guillemets ni markdown.
 
             Catalogue disponible :
@@ -248,7 +259,7 @@ public class CommandePipelineService {
             demandes.add(new BusinessRulesInput.LigneDemandee(
                     ligne.produit(), ligne.quantite(),
                     produit.get().getStock(), produit.get().getPrixUnitaire()));
-            connuesNoms.add(produit.get().getNom());
+            connuesNoms.add(ligne.quantite() + " x " + produit.get().getNom());
             commande.getLignes().add(new LigneCommande(
                     commande, produit.get(), ligne.quantite(), produit.get().getPrixUnitaire()));
             montantTotal = montantTotal.add(
@@ -308,8 +319,9 @@ public class CommandePipelineService {
 
         String contexteConnus = connuesNoms.isEmpty()
                 ? "Aucun autre produit dans la demande."
-                : "Le client a aussi commandé des produits que nous VENDONS et que nous "
-                        + "gardons de côté : " + String.join(", ", connuesNoms) + ".";
+                : "Le client a aussi commandé des produits que nous VENDONS, gardés de "
+                        + "côté avec ces quantités exactes : "
+                        + String.join(", ", connuesNoms) + ".";
 
         String message;
         String reasoning = null;
