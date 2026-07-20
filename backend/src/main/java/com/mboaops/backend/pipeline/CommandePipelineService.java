@@ -112,14 +112,34 @@ public class CommandePipelineService {
             sans guillemets ni markdown.
             """;
 
-    private static final String PROMPT_REFORMULATION = """
-            Tu es le vendeur WhatsApp de MBOA-OPS. Le patron a répondu à une demande
-            client (action=%s, commentaire du patron="%s").
+    // Cas où le client a EXPLICITEMENT demandé un crédit/délai : langage
+    // orienté "demande transmise / accordée".
+    private static final String PROMPT_REFORMULATION_CREDIT = """
+            Tu es le vendeur WhatsApp de MBOA-OPS. Le patron a répondu à la DEMANDE
+            de crédit/délai d'un client (action=%s, commentaire du patron="%s").
             Reformule cette décision en UN SEUL message WhatsApp chaleureux et naturel
             POUR LE CLIENT, à la première personne du vendeur, maximum 3 phrases.
             Ne cite JAMAIS le patron mot pour mot, n'emploie aucun terme interne.
             Si une condition (acompte, pourcentage) est mentionnée, explique-la
             simplement. Réponds uniquement avec le message, sans guillemets ni markdown.
+            """;
+
+    // Cas d'une COMMANDE NORMALE escaladée pour une raison interne (crédit en
+    // cours, stock incertain, confiance basse) : le client n'a rien demandé de
+    // spécial. Langage orienté "commande / validation", jamais "demande" ni
+    // "approuvée".
+    private static final String PROMPT_REFORMULATION_COMMANDE = """
+            Tu es le vendeur WhatsApp de MBOA-OPS. Une COMMANDE NORMALE d'un client
+            vient d'être examinée en interne (action=%s, note interne="%s").
+            IMPORTANT : le client n'a RIEN demandé de spécial, c'est une simple
+            commande. N'emploie JAMAIS les mots "demande" ni "approuvée" : parle de
+            "commande" et de "validation".
+            Reformule en UN SEUL message WhatsApp chaleureux et naturel POUR LE CLIENT,
+            à la première personne du vendeur, maximum 3 phrases. Ne cite jamais l'interne.
+            - action=APPROVE : annonce que la COMMANDE est VALIDÉE et que tu envoies le devis.
+            - action=REJECT : annonce poliment que la commande ne peut pas être traitée cette fois.
+            - action=MODIFY : annonce qu'un ajustement de la commande est en cours.
+            Réponds uniquement avec le message, sans guillemets ni markdown.
             """;
 
     private final RouterAgent routerAgent;
@@ -496,9 +516,9 @@ public class CommandePipelineService {
         }
 
         OrchestrationResult orchestration = orchestratorAgent.orchestrer(
-                sauvegardee, decision, preference.isPresent());
+                sauvegardee, decision, preference.isPresent(), demandeCredit);
 
-        return appliquerVerdict(sauvegardee, intention, decision, orchestration);
+        return appliquerVerdict(sauvegardee, intention, decision, orchestration, demandeCredit);
     }
 
     private ResultatPipeline clarifierProduitsInconnus(Commande commande,
@@ -579,7 +599,8 @@ public class CommandePipelineService {
     private ResultatPipeline appliquerVerdict(Commande commande,
                                               String intention,
                                               BusinessDecision decision,
-                                              OrchestrationResult orchestration) {
+                                              OrchestrationResult orchestration,
+                                              boolean demandeCredit) {
         UUID cardId = orchestration.decisionCard() != null
                 ? orchestration.decisionCard().getId() : null;
         String phone = commande.getClient().getTelephone();
@@ -617,10 +638,10 @@ public class CommandePipelineService {
                     }
                     // Décision NEEDS_HUMAN malgré une confiance élevée :
                     // on respecte la demande du modèle et on route vers l'humain.
-                    case NEEDS_HUMAN -> mettreEnAttentePatron(commande);
+                    case NEEDS_HUMAN -> mettreEnAttentePatron(commande, demandeCredit);
                 }
             }
-            case DECISION_CARD, ESCALADE -> mettreEnAttentePatron(commande);
+            case DECISION_CARD, ESCALADE -> mettreEnAttentePatron(commande, demandeCredit);
         }
 
         return new ResultatPipeline(commande.getId(), commande.getStatut().name(),
@@ -631,16 +652,21 @@ public class CommandePipelineService {
      * Transmet la commande au patron et prévient IMMÉDIATEMENT le client qu'il
      * attend une réponse ; le contexte passe en attente de confirmation.
      */
-    private void mettreEnAttentePatron(Commande commande) {
+    private void mettreEnAttentePatron(Commande commande, boolean demandeCredit) {
         commande.changerStatut(CommandeStatut.VALIDEE_STOCK);
         commande.changerStatut(CommandeStatut.EN_ATTENTE_PATRON);
         commandeRepository.save(commande);
 
         String phone = commande.getClient().getTelephone();
-        String message = "Bien reçu ! Je transmets votre demande au patron, "
-                + "je reviens vers vous très vite 🙏";
+        // Le langage suit la VRAIE raison de l'escalade : "demande" seulement
+        // si le client a explicitement demandé un crédit/délai, sinon message
+        // neutre orienté commande.
+        String message = demandeCredit
+                ? "Bien reçu ! Je transmets votre demande au patron, je reviens vers vous très vite 🙏"
+                : "Votre commande est en cours de validation, je reviens vers vous rapidement 👍";
         eventStore.append(commande.getId(), "MESSAGE_ATTENTE_ENVOYE",
-                Map.of("message", message, "clientPhone", phone), null, null);
+                Map.of("message", message, "clientPhone", phone, "demandeCredit", demandeCredit),
+                null, null);
         notificationService.envoyer(commande.getId(), phone, message);
         conversationService.passerEnAttenteConfirmation(phone,
                 "En attente de la décision du patron sur la commande " + commande.getId(),
@@ -652,27 +678,24 @@ public class CommandePipelineService {
      * le texte brut du commentaire), l'envoie, et clôt/adapte le contexte.
      * Appelé par le contrôleur de décision après enregistrement de l'action.
      */
-    public void reformulerEtEnvoyerReponsePatron(Commande commande, String actionLabel, String commentaire) {
+    public void reformulerEtEnvoyerReponsePatron(Commande commande, String actionLabel,
+                                                 String commentaire, boolean demandeCredit) {
         String phone = commande.getClient().getTelephone();
+        String prompt = demandeCredit ? PROMPT_REFORMULATION_CREDIT : PROMPT_REFORMULATION_COMMANDE;
         String message;
         String reasoning = null;
         try {
             message = qwenClient.callFast(
-                    PROMPT_REFORMULATION.formatted(actionLabel,
-                            commentaire == null ? "" : commentaire)).trim();
+                    prompt.formatted(actionLabel, commentaire == null ? "" : commentaire)).trim();
         } catch (Exception e) {
-            message = switch (actionLabel) {
-                case "APPROVE" -> "Bonne nouvelle ! Le patron a validé votre commande. "
-                        + "Je vous prépare le devis tout de suite.";
-                case "REJECT" -> "Merci de votre patience. Le patron ne peut pas donner suite "
-                        + "à cette commande cette fois, mais on reste à votre service !";
-                default -> "Le patron souhaite ajuster quelques détails, je reviens vers vous très vite.";
-            };
+            message = fallbackReponsePatron(actionLabel, demandeCredit);
             reasoning = "Fallback statique, échec de l'appel Qwen : " + e.getMessage();
         }
 
         eventStore.append(commande.getId(), "REPONSE_PATRON_REFORMULEE",
-                Map.of("message", message, "clientPhone", phone, "action", actionLabel), null, reasoning);
+                Map.of("message", message, "clientPhone", phone,
+                        "action", actionLabel, "demandeCredit", demandeCredit),
+                null, reasoning);
         notificationService.envoyer(commande.getId(), phone, message);
 
         if ("MODIFY".equals(actionLabel)) {
@@ -681,6 +704,24 @@ public class CommandePipelineService {
         } else {
             conversationService.fermer(phone, "Décision patron transmise au client");
         }
+    }
+
+    private String fallbackReponsePatron(String actionLabel, boolean demandeCredit) {
+        if (demandeCredit) {
+            return switch (actionLabel) {
+                case "APPROVE" -> "Bonne nouvelle ! Votre demande est acceptée. "
+                        + "Je vous prépare le devis tout de suite.";
+                case "REJECT" -> "Merci de votre patience. Nous ne pouvons pas accorder ce délai "
+                        + "cette fois, mais on reste à votre service !";
+                default -> "Nous ajustons quelques détails de votre demande, je reviens très vite.";
+            };
+        }
+        return switch (actionLabel) {
+            case "APPROVE" -> "Votre commande a été validée, je vous prépare le devis tout de suite.";
+            case "REJECT" -> "Merci de votre patience. Nous ne pouvons pas traiter cette commande "
+                    + "cette fois, mais on reste à votre service !";
+            default -> "Nous ajustons quelques détails de votre commande, je reviens très vite.";
+        };
     }
 
     private void envoyerMessageRefus(Commande commande, String message) {

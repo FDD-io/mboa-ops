@@ -94,7 +94,8 @@ public class DecisionController {
                 commande.changerStatut(CommandeStatut.APPROUVEE);
                 commandeRepository.save(commande);
                 memoryService.enregistrerApprobation(commande);
-                pipeline.reformulerEtEnvoyerReponsePatron(commande, actionLabel, commentaire);
+                pipeline.reformulerEtEnvoyerReponsePatron(commande, actionLabel, commentaire,
+                        card.isDemandeCredit());
                 pipeline.genererEtEnvoyerDevis(commande);
             }
             case REJECT -> {
@@ -102,14 +103,16 @@ public class DecisionController {
                 card.setActionAppliquee(DecisionCardAction.REJETER);
                 commande.changerStatut(CommandeStatut.REJETEE);
                 commandeRepository.save(commande);
-                pipeline.reformulerEtEnvoyerReponsePatron(commande, actionLabel, commentaire);
+                pipeline.reformulerEtEnvoyerReponsePatron(commande, actionLabel, commentaire,
+                        card.isDemandeCredit());
             }
             // MODIFY : le patron ajuste la commande hors ligne ; la commande
             // reste EN_ATTENTE_PATRON en attendant une nouvelle décision.
             case MODIFY -> {
                 card.setStatut(DecisionCardStatut.MODIFIEE);
                 card.setActionAppliquee(DecisionCardAction.MODIFIER);
-                pipeline.reformulerEtEnvoyerReponsePatron(commande, actionLabel, commentaire);
+                pipeline.reformulerEtEnvoyerReponsePatron(commande, actionLabel, commentaire,
+                        card.isDemandeCredit());
             }
         }
         decisionCardRepository.save(card);

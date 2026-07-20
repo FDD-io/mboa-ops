@@ -39,6 +39,12 @@ public class DecisionCard {
     @Column(name = "confidence")
     private Double confidence;
 
+    // true si l'escalade vient d'une demande de crédit/délai EXPLICITE du
+    // client ; false pour une commande normale escaladée (crédit en cours,
+    // stock incertain...). Conditionne le langage des messages client.
+    @Column(name = "demande_credit", nullable = false)
+    private boolean demandeCredit;
+
     @Enumerated(EnumType.STRING)
     @Column(name = "statut", nullable = false, length = 20)
     private DecisionCardStatut statut;
@@ -107,6 +113,14 @@ public class DecisionCard {
 
     public void setConfidence(Double confidence) {
         this.confidence = confidence;
+    }
+
+    public boolean isDemandeCredit() {
+        return demandeCredit;
+    }
+
+    public void setDemandeCredit(boolean demandeCredit) {
+        this.demandeCredit = demandeCredit;
     }
 
     public DecisionCardStatut getStatut() {

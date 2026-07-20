@@ -45,7 +45,12 @@ public class OrchestratorAgent {
     }
 
     public OrchestrationResult orchestrer(Commande commande, BusinessDecision decision) {
-        return orchestrer(commande, decision, false);
+        return orchestrer(commande, decision, false, false);
+    }
+
+    public OrchestrationResult orchestrer(Commande commande, BusinessDecision decision,
+                                          boolean preferencePatronApplicable) {
+        return orchestrer(commande, decision, preferencePatronApplicable, false);
     }
 
     /**
@@ -55,7 +60,7 @@ public class OrchestratorAgent {
      * précisément ce que l'apprentissage vise à automatiser.
      */
     public OrchestrationResult orchestrer(Commande commande, BusinessDecision decision,
-                                          boolean preferencePatronApplicable) {
+                                          boolean preferencePatronApplicable, boolean demandeCredit) {
         double confidence = appliquerDegradation(commande, decision);
 
         // Un refus réduit l'exposition de l'entreprise : il est toujours sûr et
@@ -76,7 +81,7 @@ public class OrchestratorAgent {
 
         boolean zoneHumaine = confidence >= SEUIL_HUMAIN && confidence <= SEUIL_AUTO;
         if (zoneHumaine || actionIrreversible) {
-            DecisionCard card = creerDecisionCard(commande, decision, confidence);
+            DecisionCard card = creerDecisionCard(commande, decision, confidence, demandeCredit);
             eventStore.append(commande.getId(), "DECISION_CARD_CREEE", decision, confidence, decision.reasoning());
             return OrchestrationResult.decisionCard(decision, card);
         }
@@ -106,7 +111,8 @@ public class OrchestratorAgent {
         return degradee;
     }
 
-    private DecisionCard creerDecisionCard(Commande commande, BusinessDecision decision, double confidence) {
+    private DecisionCard creerDecisionCard(Commande commande, BusinessDecision decision,
+                                           double confidence, boolean demandeCredit) {
         String resume = String.join("\n",
                 "Commande " + commande.getId() + " - Client " + commande.getClient().getNom()
                         + " - Montant " + commande.getMontantTotal() + " FCFA",
@@ -120,6 +126,7 @@ public class OrchestratorAgent {
 
         DecisionCard card = new DecisionCard(commande, resume, recommandation);
         card.setConfidence(confidence);
+        card.setDemandeCredit(demandeCredit);
         return decisionCardRepository.save(card);
     }
 }
