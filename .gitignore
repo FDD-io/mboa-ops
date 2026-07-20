@@ -17,3 +17,8 @@ frontend/dist/
 # OS
 .DS_Store
 Thumbs.db
+
+# Stray test output
+frontend/*.json
+!frontend/package.json
+!frontend/package-lock.json
